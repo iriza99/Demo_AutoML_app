@@ -1,0 +1,19 @@
+# Dossiers contenant des fichiers générés / temporaires
+__pycache__/
+uploads/
+decompression/
+models/
+prediction/
+logs/
+
+# Fichiers logs 
+*.log
+
+# Environnement virtuel
+.venv/
+.env
+
+# Fichiers temporaires / de sauvegarde
+*.pyc
+*.pyo
+*.swp

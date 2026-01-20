@@ -1,0 +1,10 @@
+gunicorn
+flask
+autogluon==1.4.0
+seaborn
+shap
+groq
+reportlab
+python-dotenv
+apscheduler
+
