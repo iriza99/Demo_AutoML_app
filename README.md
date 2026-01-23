@@ -52,8 +52,8 @@ UI_medical/
 1. **Clone the repository**
 
 ```bash
-SSH : git clone git@github.com:mathfrancois/UI_medical.git 
-HTTP : git clone https://github.com/mathfrancois/UI_medical.git
+SSH : git clone git@github.com:iriza99/Demo_AutoML_app.git 
+HTTP : git clone https://github.com/iriza99/Demo_AutoML_app.git
 cd UI_medical
 ```
 
