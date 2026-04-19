@@ -1,5 +1,5 @@
 ﻿from flask import Flask, request, render_template, jsonify, send_file
-from utils.model_utils import train_model, predict_model, generate_shap_plot, UserError
+from utils.model_utils import load_dataframe, train_model, predict_model, generate_shap_plot, UserError
 from utils.chatbot_utils import handle_chat_request, build_preprocessing_summary, generate_pdf
 from datetime import datetime
 import shutil
@@ -10,11 +10,13 @@ from dotenv import load_dotenv
 import logging
 from logging.handlers import RotatingFileHandler
 import threading
+import atexit
 from cleanup import cleanup_old_files
 from apscheduler.schedulers.background import BackgroundScheduler
 import os
 
 import traceback
+import uuid
 
 
 # Dictionaries to keep track of training threads and stop events
@@ -23,6 +25,13 @@ stop_events = {}
 
 # Dictionary to store training results
 training_results = {}
+
+# Server-side cache of model paths: training_id → absolute model_path
+# Used by the SHAP route so clients never need to transmit filesystem paths.
+_trained_model_paths = {}
+
+# SHAP async tasks: shap_id → {progress, done, result, error}
+_shap_tasks = {}
 
 # Load environment variables from .env file
 load_dotenv()
@@ -68,22 +77,25 @@ app = Flask(__name__)
 scheduler = BackgroundScheduler()
 scheduler.add_job(cleanup_old_files, 'interval', hours=1)
 scheduler.start()
+atexit.register(scheduler.shutdown)
 
 # Reduce verbosity of apscheduler logs
 logging.getLogger('apscheduler').setLevel(logging.WARNING)
 
-# Create necessary folders for uploads, models, decompression, and predictions
-UPLOAD_FOLDER = 'uploads'
-MODEL_FOLDER = 'models'
-DECOMPRESSION_FOLDER = 'decompression'
-PREDICTION_FOLDER = 'prediction'
+# Absolute base directory (location of app.py) — required for send_file and os.path.exists
+# to work correctly regardless of the process's working directory.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
+MODEL_FOLDER = os.path.join(BASE_DIR, 'models')
+DECOMPRESSION_FOLDER = os.path.join(BASE_DIR, 'decompression')
+PREDICTION_FOLDER = os.path.join(BASE_DIR, 'prediction')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(MODEL_FOLDER, exist_ok=True)
 os.makedirs(PREDICTION_FOLDER, exist_ok=True)
 
 # Flask app configuration
 app.config['ENV'] = os.getenv("FLASK_ENV", "production")
-app.config['DEBUG'] = os.getenv("DEBUG", "False").lower() == "true"
+app.config['DEBUG'] = is_debug
 app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10 MB max upload
 
 ALLOWED_EXTENSIONS = {'csv', 'xls', 'xlsx', 'xlsm', 'arff'}
@@ -126,31 +138,30 @@ def train():
             raise UserError("error_unsupported_file_format")
 
         target_column = request.form['target_column'].strip()
-        time_limit = int(request.form.get('time_limit', 60))
-        if time_limit < 10 or time_limit > 600:
+        time_limit = int(request.form.get('time_limit', 3600))
+        if time_limit < 60 or time_limit > 10800:  # 1 min – 3 h in seconds
             raise UserError("error_time_limit_range")
         time_column = request.form.get('time_column', None)
         prediction_length_percent = request.form.get('prediction_length_percent', None)
+        eval_metric = request.form.get('eval_metric', None)
+        excluded_str = request.form.get('excluded_model_types', '')
+        excluded_model_types = [m.strip() for m in excluded_str.split(',') if m.strip()] or None
+        use_cv = request.form.get('use_cv', '1') == '1'
+        num_bag_folds = 8 if use_cv else 0
+        val_size = None
+        if not use_cv:
+            try:
+                val_size = float(request.form.get('val_size', '0.20'))
+                val_size = max(0.10, min(0.50, val_size))
+            except (ValueError, TypeError):
+                val_size = 0.20
 
         filename = secure_filename(file.filename)
         path = os.path.join(UPLOAD_FOLDER, filename)
         file.save(path)
         logger.debug(f"File received: {filename}")
 
-        # Load dataset based on file extension
-        ext = os.path.splitext(path)[1].lower()
-        if ext == '.csv':
-            df = pd.read_csv(path)
-        elif ext in ['.xls', '.xlsx', '.xlsm']:
-            df = pd.read_excel(path)
-        elif ext == '.arff':
-            from scipy.io import arff
-            data, meta = arff.loadarff(path)
-            df = pd.DataFrame(data)
-            for col in df.select_dtypes([object]).columns:
-                df[col] = df[col].apply(lambda x: x.decode('utf-8') if isinstance(x, bytes) else x)
-        else:
-            raise UserError("error_unsupported_file_format")
+        df = load_dataframe(path)
 
         # Validate target column
         if target_column not in df.columns:
@@ -168,13 +179,20 @@ def train():
         # Training task to run in a separate thread
         def training_task():
             try:
-                metrics = train_model(df, target_column, time_limit, training_folder, stop_event, time_column=time_column, prediction_length_percent=prediction_length_percent)
+                metrics = train_model(df, target_column, time_limit, training_folder, stop_event,
+                                     time_column=time_column, prediction_length_percent=prediction_length_percent,
+                                     eval_metric=eval_metric, excluded_model_types=excluded_model_types,
+                                     num_bag_folds=num_bag_folds, val_size=val_size)
                 zip_path = os.path.join(MODEL_FOLDER, zip_filename)
                 shutil.make_archive(base_name=zip_path.replace('.zip', ''), format='zip', root_dir=training_folder)
                 logger.info(f"Model compressed and saved: {zip_filename}")
                 metrics['download_url'] = f"/download_model/{zip_filename}"
                 metrics['markdown_preview'] = markdown_preview
                 metrics['training_id'] = training_id
+
+                # Cache model path server-side so SHAP route never needs a client-supplied path
+                if metrics.get('model_path'):
+                    _trained_model_paths[training_id] = metrics['model_path']
 
                 training_results[training_id] = metrics
                 logger.info(f"Training successfully completed for {training_id}.")
@@ -280,18 +298,31 @@ def shap_plot():
         if not file or not allowed_file(file.filename):
             raise UserError("error_no_dataset")
 
-        df = pd.read_csv(file)
-        model_path = request.form.get('model_path')
+        df = load_dataframe(file)
         target_column = request.form.get('target_column')
+
+        training_id_req = request.form.get('training_id', '')
+        model_path = _trained_model_paths.get(training_id_req) or request.form.get('model_path', '')
 
         if not model_path or not os.path.exists(model_path):
             raise UserError("error_invalid_model_path")
         if not target_column:
             raise UserError("error_missing_target_column")
 
-        result = generate_shap_plot(model_path, df, target_column)
-        logger.info("SHAP plot generated successfully.")
-        return jsonify(result)
+        shap_id = uuid.uuid4().hex[:12]
+        _shap_tasks[shap_id] = {'progress': 0, 'done': False, 'result': None, 'error': None}
+
+        def _worker():
+            try:
+                result = generate_shap_plot(model_path, df, target_column)
+                _shap_tasks[shap_id].update({'progress': 100, 'done': True, 'result': result})
+                logger.info("SHAP plot generated successfully.")
+            except Exception as exc:
+                _shap_tasks[shap_id].update({'done': True, 'error': str(exc)})
+                logger.error(f"SHAP worker error: {traceback.format_exc()}")
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return jsonify({'shap_id': shap_id})
 
     except UserError as ue:
         logger.warning(f"User error SHAP: {ue.message_key}")
@@ -299,6 +330,19 @@ def shap_plot():
     except Exception as e:
         logger.error(f"Critical error SHAP: {traceback.format_exc()}")
         return jsonify({"error": "error_shap_failed"}), 500
+
+
+@app.route('/shap_progress/<shap_id>', methods=['GET'])
+def shap_progress(shap_id):
+    task = _shap_tasks.get(shap_id)
+    if not task:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify({
+        'progress': task['progress'],
+        'done': task['done'],
+        'error': task['error'],
+        'result': task['result'] if task['done'] and not task['error'] else None
+    })
 
 @app.route('/predict', methods=['POST'])
 def predict():

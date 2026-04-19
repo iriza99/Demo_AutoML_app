@@ -21,20 +21,19 @@ def cleanup_old_files():
     for folder, max_age in FOLDERS_TO_CLEAN.items():
         if not os.path.exists(folder):
             continue
-        for filename in os.listdir(folder):
-            file_path = os.path.join(folder, filename)
-            try:
-                file_age = now - os.path.getmtime(file_path)
-                if os.path.isdir(file_path):
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                try:
+                    file_age = now - entry.stat().st_mtime
                     if file_age > max_age:
-                        shutil.rmtree(file_path)
-                        logging.info(f"Dossier supprimé : {file_path}")
-                else:
-                    if file_age > max_age:
-                        os.remove(file_path)
-                        logging.info(f"Fichier supprimé : {file_path}")
-            except Exception as e:
-                logging.error(f"Erreur lors de la suppression de {file_path} : {e}")
+                        if entry.is_dir():
+                            shutil.rmtree(entry.path)
+                            logging.info(f"Dossier supprimé : {entry.path}")
+                        else:
+                            os.remove(entry.path)
+                            logging.info(f"Fichier supprimé : {entry.path}")
+                except Exception as e:
+                    logging.error(f"Erreur lors de la suppression de {entry.path} : {e}")
 
 if __name__ == "__main__":
     cleanup_old_files()

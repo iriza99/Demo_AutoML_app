@@ -1,3 +1,5 @@
+/* global JSZip, XLSX, Papa */
+
 // Global variables to store state across the app
 let lastTrainedModelPath = null;
 let lastUsedTargetColumn = null;
@@ -15,11 +17,142 @@ let currentShapRequestId = null;
 let pngResultTrainingForPrediction = null;
 let appMode = 1; // 1 = train, 2 = predict
 let trainingCountdownInterval = null;
+let trainingModelInterval = null;
+let trainingTotalSeconds = 0;
 let detectedTimeColumns = [];
 let wizardCurrentStep = 1;
 let wizardMaxStep = 1;
 let datasetLoaded = false;
 let totalDataRows = 0;
+
+// ── Advanced Options ─────────────────────────────────────────────────────────
+const ADVANCED_METRICS = {
+  classification: [
+    { value: 'accuracy',         label: 'Accuracy' },
+    { value: 'roc_auc',          label: 'ROC AUC' },
+    { value: 'f1_macro',         label: 'F1 Macro' },
+  ],
+  regression: [
+    { value: 'root_mean_squared_error', label: 'RMSE' },
+    { value: 'mean_absolute_error',     label: 'MAE' },
+    { value: 'r2',                      label: 'R²' },
+  ],
+  timeseries: [
+    { value: 'MASE', label: 'MASE (Mean Absolute Scaled Error)' },
+    { value: 'MAPE', label: 'MAPE (Mean Absolute Percentage Error)' },
+    { value: 'WQL',  label: 'WQL (Weighted Quantile Loss)' },
+  ],
+};
+
+const ADVANCED_MODELS = {
+  // Order matches AutoGluon's actual training sequence (KNN first, then boosters, then NNs)
+  tabular: [
+    { value: 'KNN',      label: 'KNeighbors' },
+    { value: 'GBM',      label: 'LightGBM' },
+    { value: 'XGB',      label: 'XGBoost' },
+    { value: 'CAT',      label: 'CatBoost' },
+    { value: 'RF',       label: 'Random Forest' },
+    { value: 'XT',       label: 'Extra Trees' },
+    { value: 'NN_TORCH', label: 'Neural Net (Torch)' },
+    { value: 'FASTAI',   label: 'Neural Net (FastAI)' },
+  ],
+  // AutoGluon TimeSeriesPredictor medium_quality preset ("light" hyperparameters)
+  timeseries: [
+    { value: 'Naive',                    label: 'Naive' },
+    { value: 'SeasonalNaive',            label: 'Seasonal Naive' },
+    { value: 'ETS',                      label: 'ETS' },
+    { value: 'Theta',                    label: 'Theta' },
+    { value: 'RecursiveTabular',         label: 'Recursive Tabular' },
+    { value: 'DirectTabular',            label: 'Direct Tabular' },
+    { value: 'TemporalFusionTransformer',label: 'TFT' },
+    { value: 'Chronos',                  label: 'Chronos' },
+  ],
+};
+
+function toggleValSplit() {
+  const checked = document.getElementById('adv-use-cv').checked;
+  const container = document.getElementById('adv-val-split-container');
+  if (container) container.style.display = checked ? 'none' : 'flex';
+}
+
+function toggleAdvancedOptions() {
+  const body = document.getElementById('advanced-options-body');
+  const arrow = document.getElementById('advanced-arrow');
+  const isOpen = body.style.display !== 'none';
+  body.style.display = isOpen ? 'none' : 'block';
+  arrow.style.transform = isOpen ? '' : 'rotate(90deg)';
+}
+
+function openAdvancedOptions() {
+  const body = document.getElementById('advanced-options-body');
+  const arrow = document.getElementById('advanced-arrow');
+  if (body.style.display === 'none') {
+    body.style.display = 'block';
+    arrow.style.transform = 'rotate(90deg)';
+  }
+}
+
+function updateAdvancedOptions() {
+  const isTimeSeries = detectedTimeColumns.length > 0;
+  const targetCol = document.getElementById('target-column')?.value;
+  const targetStat = (dataSetStats || []).find(s => s.name === targetCol);
+  const isNumericType = targetStat?.type === 'Numeric';
+  const uniqueCount = targetStat?.unique ?? Infinity;
+  // Numeric columns with few unique values are likely multiclass (mirrors AutoGluon heuristic)
+  const isNumeric = isNumericType && uniqueCount > 20;
+
+  const taskType = isTimeSeries ? 'timeseries' : (isNumeric ? 'regression' : 'classification');
+
+  // Metric dropdown
+  const metricSelect = document.getElementById('adv-eval-metric');
+  if (metricSelect) {
+    metricSelect.innerHTML = '';
+    ADVANCED_METRICS[taskType].forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.value;
+      opt.textContent = m.label;
+      metricSelect.appendChild(opt);
+    });
+  }
+
+  // Model checkboxes
+  const modelList = isTimeSeries ? ADVANCED_MODELS.timeseries : ADVANCED_MODELS.tabular;
+  const container = document.getElementById('adv-models-container');
+  if (container) {
+    container.innerHTML = '';
+    modelList.forEach(m => {
+      const lbl = document.createElement('label');
+      lbl.style.cssText = 'display:flex;align-items:center;gap:4px;padding:3px 8px;border:1px solid #ccc;border-radius:4px;cursor:pointer;font-size:0.88em;background:#fff;';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = m.value;
+      cb.name = 'adv-model';
+      cb.checked = true;
+      lbl.appendChild(cb);
+      lbl.appendChild(document.createTextNode(m.label));
+      container.appendChild(lbl);
+    });
+  }
+
+  // Cross-validation: only for tabular
+  const cvContainer = document.getElementById('adv-cv-container');
+  if (cvContainer) cvContainer.style.display = isTimeSeries ? 'none' : 'flex';
+
+  // Prediction horizon: only for time series
+  const predLenContainer = document.getElementById('pred-len-container');
+  if (predLenContainer) predLenContainer.style.display = isTimeSeries ? 'flex' : 'none';
+
+  // Auto-open panel when time series detected so user sees prediction horizon
+  if (isTimeSeries) openAdvancedOptions();
+}
+
+function resetAdvancedOptions() {
+  const body = document.getElementById('advanced-options-body');
+  const arrow = document.getElementById('advanced-arrow');
+  if (body) body.style.display = 'none';
+  if (arrow) arrow.style.transform = '';
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 function setUploadStatus(key) {
   const el = document.getElementById("upload-status-text");
@@ -113,10 +246,23 @@ function miniHistogram(values) {
 
 
 // On DOM ready: set language and update time display
+function toggleDarkMode() {
+  const enabled = document.body.classList.toggle("dark-mode");
+  localStorage.setItem("darkMode", enabled ? "1" : "0");
+  document.getElementById("dm-thumb").classList.toggle("dm-on", enabled);
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   const savedLang = localStorage.getItem("selectedLanguage") || "en";
   document.getElementById("language-select").value = savedLang;
   changeLanguage(savedLang);
+
+  if (localStorage.getItem("darkMode") === "1") {
+    document.body.classList.add("dark-mode");
+    const thumb = document.getElementById("dm-thumb");
+    if (thumb) thumb.classList.add("dm-on");
+  }
+
   updateTimeDisplay();
   setWizardStep(1);
   initCsvDropzone();
@@ -170,10 +316,15 @@ function initCsvDropzone() {
   });
 }
 
-// Show or hide the training overlay
+// Show or hide the training panel
 function showTrainingOverlay(show) {
-  const el = document.getElementById("training-overlay");
-  if (el) el.style.display = show ? "flex" : "none";
+  const panel = document.getElementById("training-panel");
+  if (!panel) return;
+  if (show) {
+    panel.classList.add("visible");
+  } else {
+    panel.classList.remove("visible");
+  }
 }
 
 function stopTrainingCountdown() {
@@ -183,6 +334,62 @@ function stopTrainingCountdown() {
   }
   const countdownEl = document.getElementById("training-countdown");
   if (countdownEl) countdownEl.textContent = "--:--";
+  const ringEl = document.getElementById("tp-ring-fill");
+  if (ringEl) ringEl.style.strokeDashoffset = "238.76";
+  const fillEl = document.getElementById("tp-progress-fill");
+  if (fillEl) fillEl.style.width = "0%";
+  const pctEl = document.getElementById("tp-progress-pct");
+  if (pctEl) pctEl.textContent = "0%";
+  // Reset panel title and dot if they were changed to finalizing state
+  const dot = document.querySelector('.tp-pulse-dot');
+  if (dot) dot.classList.remove('finalizing');
+  const title = document.querySelector('.tp-title');
+  if (title) { title.removeAttribute('data-i18n-active'); title.textContent = t('trainingOverlayTitle') || 'Training model…'; }
+}
+
+function showFinalizingState() {
+  stopModelAnimation();
+
+  // Amber pulsing dot
+  const dot = document.querySelector('.tp-pulse-dot');
+  if (dot) dot.classList.add('finalizing');
+
+  // Update title
+  const title = document.querySelector('.tp-title');
+  if (title) title.textContent = t('finalizingTitle') || 'Generating results…';
+
+  // Keep timer at 0:00 and bar at 100%
+  const countdownEl = document.getElementById("training-countdown");
+  if (countdownEl) countdownEl.textContent = "0:00";
+  const fillEl = document.getElementById("tp-progress-fill");
+  if (fillEl) fillEl.style.width = "100%";
+  const pctEl = document.getElementById("tp-progress-pct");
+  if (pctEl) pctEl.textContent = "100%";
+
+  // Append finalizing rows to model list
+  const listEl = document.getElementById("tp-models-list");
+  if (!listEl) return;
+  const finalizingSteps = [
+    t('finalizingOOF')               || 'Computing OOF predictions (unseen data)',
+    t('finalizingFeatureImportance') || 'Computing feature importance',
+    t('finalizingPlots')             || 'Generating validation plots',
+    t('finalizingReport')            || 'Preparing leaderboard',
+  ];
+  const divider = document.createElement('div');
+  divider.className = 'tp-divider';
+  divider.id = 'tp-finalizing-divider';
+  listEl.appendChild(divider);
+  finalizingSteps.forEach((label, i) => {
+    const row = document.createElement('div');
+    row.className = 'tp-model-row training';
+    row.id = `tp-finalizing-${i}`;
+    row.innerHTML = `
+      <span class="tp-model-icon spin">↻</span>
+      <span class="tp-model-name">${label}</span>
+    `;
+    listEl.appendChild(row);
+  });
+  listEl.lastElementChild?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 function startTrainingCountdown(totalSeconds) {
@@ -190,23 +397,115 @@ function startTrainingCountdown(totalSeconds) {
   const countdownEl = document.getElementById("training-countdown");
   if (!countdownEl || !Number.isFinite(totalSeconds)) return;
 
-  let remaining = Math.max(0, Math.floor(totalSeconds));
+  trainingTotalSeconds = Math.max(1, totalSeconds);
+  let remaining = Math.floor(totalSeconds);
+  const circumference = 238.76; // 2 * π * 38
 
   const render = () => {
     const mins = Math.floor(remaining / 60);
     const secs = remaining % 60;
     countdownEl.textContent = `${mins}:${secs.toString().padStart(2, "0")}`;
+
+    const pct = remaining / trainingTotalSeconds;
+    const ringEl = document.getElementById("tp-ring-fill");
+    if (ringEl) ringEl.style.strokeDashoffset = circumference * (1 - pct);
+
+    const elapsed = (1 - pct) * 100;
+    const fillEl = document.getElementById("tp-progress-fill");
+    if (fillEl) fillEl.style.width = `${elapsed.toFixed(1)}%`;
+    const pctEl = document.getElementById("tp-progress-pct");
+    if (pctEl) pctEl.textContent = `${Math.round(elapsed)}%`;
   };
 
   render();
   trainingCountdownInterval = setInterval(() => {
-    remaining -= 1;
-    if (remaining < 0) {
-      stopTrainingCountdown();
-      return;
-    }
+    remaining = Math.max(0, remaining - 1);
     render();
+    if (remaining <= 0) {
+      clearInterval(trainingCountdownInterval);
+      trainingCountdownInterval = null;
+      showFinalizingState();
+    }
   }, 1000);
+}
+
+// ── Training Panel – model queue animation ────────────────────────────────────
+
+function initTrainingPanel(selectedModels, datasetName, targetCol) {
+  const nameEl = document.getElementById("tp-dataset-name");
+  const targetEl = document.getElementById("tp-target-col");
+  if (nameEl) nameEl.textContent = datasetName;
+  if (targetEl) targetEl.textContent = `▸ ${targetCol}`;
+
+  const listEl = document.getElementById("tp-models-list");
+  if (!listEl) return;
+  listEl.innerHTML = '';
+  selectedModels.forEach((model, i) => {
+    const row = document.createElement('div');
+    row.className = 'tp-model-row pending';
+    row.id = `tp-model-${i}`;
+    row.innerHTML = `
+      <span class="tp-model-icon">○</span>
+      <span class="tp-model-name">${model.label}</span>
+      <span class="tp-model-badge">${t('modelPending') || 'Pending'}</span>
+    `;
+    listEl.appendChild(row);
+  });
+}
+
+function startModelAnimation(nModels, totalSeconds) {
+  if (trainingModelInterval) clearInterval(trainingModelInterval);
+  if (nModels === 0) return;
+  let currentIdx = 0;
+  const perModel = Math.max(3000, (totalSeconds * 1000) / nModels);
+  _markModelTraining(currentIdx);
+  trainingModelInterval = setInterval(() => {
+    _markModelDone(currentIdx);
+    currentIdx++;
+    if (currentIdx < nModels) {
+      _markModelTraining(currentIdx);
+    } else {
+      clearInterval(trainingModelInterval);
+      trainingModelInterval = null;
+    }
+  }, perModel);
+}
+
+function _markModelTraining(idx) {
+  const row = document.getElementById(`tp-model-${idx}`);
+  if (!row) return;
+  row.className = 'tp-model-row training';
+  const icon = row.querySelector('.tp-model-icon');
+  icon.className = 'tp-model-icon spin';
+  icon.textContent = '↻';
+  row.querySelector('.tp-model-badge').textContent = t('modelTraining') || 'Training';
+  row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function _markModelDone(idx) {
+  const row = document.getElementById(`tp-model-${idx}`);
+  if (!row) return;
+  row.className = 'tp-model-row done';
+  const icon = row.querySelector('.tp-model-icon');
+  icon.className = 'tp-model-icon';
+  icon.textContent = '✓';
+  row.querySelector('.tp-model-badge').textContent = t('modelDone') || 'Done';
+}
+
+function stopModelAnimation() {
+  if (trainingModelInterval) {
+    clearInterval(trainingModelInterval);
+    trainingModelInterval = null;
+  }
+  document.querySelectorAll('.tp-model-row').forEach(row => {
+    if (row.classList.contains('pending') || row.classList.contains('training')) {
+      row.className = 'tp-model-row done';
+      const icon = row.querySelector('.tp-model-icon');
+      if (icon) { icon.className = 'tp-model-icon'; icon.textContent = '✓'; }
+      const badge = row.querySelector('.tp-model-badge');
+      if (badge) badge.textContent = t('modelDone') || 'Done';
+    }
+  });
 }
 
 function getGroqKey() {
@@ -231,10 +530,9 @@ function hideGroqModal() {
 
 
 // Update the time limit display based on slider value
-function updateTimeDisplay(event) {
+function updateTimeDisplay() {
   const slider = document.getElementById("training-time-limit");
   const display = document.getElementById("time-limit-display");
-  // const tooltip = document.getElementById("time-tooltip");
 
   const minutes = parseInt(slider.value, 10);
   const hours = Math.floor(minutes / 60);
@@ -252,15 +550,9 @@ function updateTimeDisplay(event) {
   }
 
   display.textContent = formatted;
-  // tooltip.textContent = formatted;
-
-  const sliderWidth = slider.offsetWidth;
-  const percent = (slider.value - slider.min) / (slider.max - slider.min);
-  const offset = sliderWidth * percent;
-  // tooltip.style.left = `${offset}px`;
 }
 
-function updatePredLenDisplay(event) {
+function updatePredLenDisplay() {
   const slider = document.getElementById("prediction-length-percent");
   const display = document.getElementById("pred-len-display");
   if (!slider || !display) return;
@@ -351,6 +643,33 @@ function removeModelFile() {
   document.getElementById('model-status').style.display = 'none';
 }
 
+// Parse ARFF file content into a rows array (header row + data rows)
+function parseArff(content) {
+  const lines = content.split('\n');
+  const columns = [];
+  const dataLines = [];
+  let inData = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('%')) continue;
+
+    if (inData) {
+      dataLines.push(trimmed);
+    } else if (trimmed.toLowerCase().startsWith('@attribute')) {
+      const match = trimmed.match(/@attribute\s+['"]?([^'"@\s]+)['"]?/i);
+      if (match) columns.push(match[1]);
+    } else if (trimmed.toLowerCase().startsWith('@data')) {
+      inData = true;
+    }
+  }
+
+  if (columns.length === 0 || dataLines.length === 0) return null;
+
+  const parsed = Papa.parse(dataLines.join('\n'), { header: false, skipEmptyLines: true });
+  return [columns, ...parsed.data];
+}
+
 // Handle CSV upload, preview, and stats
 document.getElementById('upload-csv').addEventListener('change', function () {
 
@@ -394,7 +713,7 @@ document.getElementById('upload-csv').addEventListener('change', function () {
       setUploadStatus("uploadStatusIdle");
     };
 
-    if (ext === 'csv' || ext === 'arff') {
+    if (ext === 'csv') {
       reader.onload = function (e) {
         const content = e.target.result;
         const parsed = Papa.parse(content, {
@@ -404,6 +723,21 @@ document.getElementById('upload-csv').addEventListener('change', function () {
         buildPreview(parsed.data);
         setUploadStatus("uploadStatusLoaded");
         toggleFormatsIcon(false);
+      };
+      reader.readAsText(file);
+    } else if (ext === 'arff') {
+      reader.onload = function (e) {
+        const rows = parseArff(e.target.result);
+        if (rows) {
+          buildPreview(rows);
+          setUploadStatus("uploadStatusLoaded");
+          toggleFormatsIcon(false);
+        } else {
+          const previewLoading = document.getElementById('preview-loading');
+          if (previewLoading) previewLoading.style.display = 'none';
+          showAlert(t("pleaseSelectFile"), 'warning');
+          setUploadStatus("uploadStatusIdle");
+        }
       };
       reader.readAsText(file);
     } else if (['xls', 'xlsx', 'xlsm'].includes(ext)) {
@@ -566,7 +900,7 @@ function buildPreview(rows) {
   // Update target column select
   refreshTargetOptions(header);
   // Detect time-like columns using a stricter heuristic
-  detectedTimeColumns = header.filter((col, idx) => {
+  detectedTimeColumns = header.filter((_, idx) => {
     let parsable = 0;
     let total = 0;
     for (let i = 1; i < rows.length; i++) {
@@ -603,6 +937,7 @@ function buildPreview(rows) {
     }
   }
   buildStats(rows);
+  updateAdvancedOptions();
 
   buildImputationControls(header, rows);
   document.getElementById("enable-imputation").checked = false;
@@ -642,6 +977,8 @@ function refreshTargetOptions(header) {
   const targetSelect = document.getElementById("target-column");
   if (!targetSelect) return;
 
+  targetSelect.onchange = updateAdvancedOptions;
+
   const dropped = new Set(
     Array.from(document.querySelectorAll('#drop-columns-list input[type="checkbox"]:checked')).map(cb => cb.value)
   );
@@ -660,6 +997,7 @@ function refreshTargetOptions(header) {
   if (current && !dropped.has(current)) {
     targetSelect.value = current;
   }
+  updateAdvancedOptions();
 }
 
 // Remove uploaded CSV file and reset UI
@@ -695,6 +1033,7 @@ function removeCSVFile() {
   dataSetPreview = null;
   lastDatasetName = null;
   datasetLoaded = false;
+  resetAdvancedOptions();
 
   currentShapRequestId = null;
 
@@ -752,11 +1091,18 @@ function buildImputationControls(header, data) {
     select.name = `impute-${colName}`;
     select.dataset.col = colName;
 
-    ["mean", "median", "mode", "constant"].forEach(method => {
+    // Only offer mean/median for numeric columns; categorical columns get mode/constant only
+    const colValues = data.slice(1)
+      .map(row => row[colIndex])
+      .filter(v => v !== "" && v !== null && v !== undefined && v.toString().toLowerCase() !== "nan");
+    const isNumeric = colValues.length > 0 && colValues.every(v => !isNaN(parseFloat(v)));
+    const methods = isNumeric ? ["mean", "median", "mode", "constant"] : ["mode", "constant"];
+
+    methods.forEach(method => {
       const option = document.createElement("option");
       option.value = method;
-      option.textContent = t(method); 
-      option.setAttribute("data-i18n", method); 
+      option.textContent = t(method);
+      option.setAttribute("data-i18n", method);
       select.appendChild(option);
     });
 
@@ -817,6 +1163,7 @@ function resetTrainingButtons() {
   document.getElementById('stop-training-btn').style.display = "none";
   document.getElementById('training-spinner').style.display = "none";
   stopTrainingCountdown();
+  stopModelAnimation();
   showTrainingOverlay(false);
 }
 
@@ -844,7 +1191,7 @@ function pollTrainingResult(trainingId) {
         }
         resetTrainingButtons();
       })
-      .catch(err => {
+      .catch(_ => {
         clearInterval(pollingIntervalTraining);
         showAlert(t("trainingErrorNetwork"), 'error');
         resetTrainingButtons();
@@ -887,10 +1234,18 @@ function startTraining() {
     return;
   }
 
+  // Collect selected models for the progress panel
+  const selectedModelEls = Array.from(document.querySelectorAll('#adv-models-container input[type="checkbox"]:checked'));
+  const panelModels = selectedModelEls.length > 0
+    ? selectedModelEls.map(cb => ({ value: cb.value, label: cb.closest('label')?.textContent?.trim() || cb.value }))
+    : (detectedTimeColumns.length > 0 ? ADVANCED_MODELS.timeseries : ADVANCED_MODELS.tabular);
+
   document.getElementById('start-training-btn').style.display = "none";
   document.getElementById('stop-training-btn').style.display = "inline-block";
   document.getElementById('training-spinner').style.display = "inline-block";
+  initTrainingPanel(panelModels, file.name, targetColumn);
   startTrainingCountdown(totalSeconds);
+  startModelAnimation(panelModels.length, totalSeconds);
   showTrainingOverlay(true);
   unlockWizardStep(3);
   setWizardStep(3);
@@ -902,9 +1257,17 @@ function startTraining() {
     let data = [];
     let header = [];
 
-    if (ext === 'csv' || ext === 'arff') {
-      const parsed = Papa.parse(e.target.result, { header: false, skipEmptyLines: false });
+    if (ext === 'csv') {
+      const parsed = Papa.parse(e.target.result, { header: false, skipEmptyLines: true });
       data = parsed.data;
+    } else if (ext === 'arff') {
+      const rows = parseArff(e.target.result);
+      if (!rows) {
+        showAlert(t("unsupportedFormat"), 'warning');
+        document.getElementById('training-spinner').style.display = "none";
+        return;
+      }
+      data = rows;
     } else if (['xls', 'xlsx', 'xlsm'].includes(ext)) {
       const workbook = XLSX.read(new Uint8Array(e.target.result), { type: 'array' });
       const sheetName = workbook.SheetNames[0];
@@ -985,9 +1348,7 @@ function startTraining() {
       }
     };
 
-    // Remove last row (if needed) and convert to CSV
-    const cleanedDataSWhithoutLastRow = cleanedData.slice(0, -1);
-    const csv = Papa.unparse(cleanedDataSWhithoutLastRow, { quotes: false });
+    const csv = Papa.unparse(cleanedData, { quotes: false });
 
     // Prepare cleaned file for upload
     const formData = new FormData();
@@ -1004,6 +1365,24 @@ function startTraining() {
     if (predLenSlider) {
       formData.append('prediction_length_percent', predLenSlider.value);
     }
+  }
+
+  // Advanced options
+  const advMetric = document.getElementById('adv-eval-metric');
+  if (advMetric && advMetric.value) formData.append('eval_metric', advMetric.value);
+
+  const excludedModels = Array.from(document.querySelectorAll('#adv-models-container input[type="checkbox"]'))
+    .filter(cb => !cb.checked).map(cb => cb.value);
+  if (excludedModels.length > 0) formData.append('excluded_model_types', excludedModels.join(','));
+
+  const useCvCb = document.getElementById('adv-use-cv');
+  const useCv = useCvCb && useCvCb.checked;
+  formData.append('use_cv', useCv ? '1' : '0');
+  if (!useCv) {
+    const valSize = document.getElementById('adv-val-size');
+    const parsed = valSize ? parseInt(valSize.value, 10) : NaN;
+    const safeVal = (!isNaN(parsed) && parsed >= 10 && parsed <= 50) ? parsed : 20;
+    formData.append('val_size', (safeVal / 100).toFixed(2));
   }
 
     lastUsedTargetColumn = targetColumn;
@@ -1028,7 +1407,7 @@ function startTraining() {
       pollTrainingResult(tempTrainingId);
 
     })
-.catch(error => {
+.catch(_ => {
       resetTrainingButtons();
       document.getElementById('training-spinner').style.display = "none";
       showTrainingOverlay(false);
@@ -1043,6 +1422,7 @@ function startTraining() {
     reader.readAsArrayBuffer(file);
   }
 }
+
 
 // Render training results and plots in the UI
 function renderTrainingResults(data) {
@@ -1087,6 +1467,7 @@ function renderTrainingResults(data) {
     const plotBase64 = metrics[metric].plot;
     const plotHist = metrics[metric].plot_hist || null;
     const metricLabel = metric.toUpperCase();
+    if (value == null) continue;
     const formattedValue = value.toFixed(4);
 
     metricsHTML += `<tr><td>${metricLabel}</td><td>${formattedValue}</td></tr>`;
@@ -1094,15 +1475,13 @@ function renderTrainingResults(data) {
     if (metricLabel === "RMSE" && plotBase64 && plotHist) {
       plotsHTML += `
         <div class="plot-card">
-          <p><strong>${metricLabel}</strong></p>
           <img src="data:image/png;base64,${plotBase64}" alt="${metricLabel} Plot" />
-          <img src="data:image/png;base64,${plotHist}" alt="${metricLabel} Histogram" />
+          <img src="data:image/png;base64,${plotHist}" alt="${metricLabel} Error Distribution" />
         </div>
       `;
     } else if (plotBase64) {
       plotsHTML += `
         <div class="plot-card">
-          <p><strong>${metricLabel}</strong></p>
           <img src="data:image/png;base64,${plotBase64}" alt="${metricLabel} Plot" />
         </div>
       `;
@@ -1112,7 +1491,6 @@ function renderTrainingResults(data) {
   if (data.task_type === "timeseries" && data.forecast_plot) {
     plotsHTML += `
       <div class="plot-card">
-        <p><strong>Forecast vs Actual</strong></p>
         <img src="data:image/png;base64,${data.forecast_plot}" alt="Forecast vs Actual" />
       </div>
     `;
@@ -1153,9 +1531,9 @@ function renderTrainingResults(data) {
               ${data.leaderboard.map(row => `
                 <tr>
                   <td>${row.model}</td>
-                  <td>${row.score_val.toFixed(4)}</td>
-                  <td>${row.fit_time.toFixed(2)}s</td>
-                  <td>${row.pred_time_val.toFixed(2)}s</td>
+                  <td>${row.score_val != null ? row.score_val.toFixed(4) : 'N/A'}</td>
+                  <td>${row.fit_time != null ? row.fit_time.toFixed(2) + 's' : 'N/A'}</td>
+                  <td>${row.pred_time_val != null ? row.pred_time_val.toFixed(2) + 's' : 'N/A'}</td>
                 </tr>
               `).join("")}
             </tbody>
@@ -1171,34 +1549,40 @@ function renderTrainingResults(data) {
   resultsDiv.innerHTML += summaryHTML;
 
   // -------- Model Explainability Section --------
-  let explainabilityHTML = `
-    <div class="result-section" id="model-explainability-section">
-      <h3 data-i18n="modelExplainability">${t("modelExplainability")}</h3>
-  `;
+  const isTimeseries = data.task_type === "timeseries";
+  const hasExplainability = data.feature_importance_plot || !isTimeseries;
 
-  if (data.feature_importance_plot) {
-    explainabilityHTML += `
-      <div class="plot-card">
-        <h4 data-i18n="featureImportance">${t("featureImportance")}</h4>
-        <img src="data:image/png;base64,${data.feature_importance_plot}" alt="Feature Importance Plot" />
-      </div>
+  if (hasExplainability) {
+    let explainabilityHTML = `
+      <div class="result-section" id="model-explainability-section">
+        <h3 data-i18n="modelExplainability">${t("modelExplainability")}</h3>
     `;
+
+    if (data.feature_importance_plot) {
+      explainabilityHTML += `
+        <div class="plot-card">
+          <img src="data:image/png;base64,${data.feature_importance_plot}" alt="Feature Importance Plot" />
+        </div>
+      `;
+    }
+
+    if (!isTimeseries) {
+      explainabilityHTML += `
+        <div class="button-container">
+          <div style="display: flex; align-items: center; gap: 15px;">
+            <button id="generate-shap-button" onclick="generateShapPlot()" class="generate-shap-button" data-i18n="generateShap">
+              ${t("generateShap")}
+            </button>
+            <span class="help-icon" title="${t('shapExpensiveInfo')}" data-i18n="shapExpensiveInfo">i</span>
+            <div id="training-spinner-shap" class="spinner" style="display: none;"></div>
+          </div>
+        </div>
+        <div class="plot-card" id="shap-plots"></div>`;
+    }
+
+    explainabilityHTML += `</div>`; // End Model Explainability
+    resultsDiv.innerHTML += explainabilityHTML;
   }
-
-  explainabilityHTML += `
-    <div class="button-container">
-      <div style="display: flex; align-items: center; gap: 15px;">
-        <button id="generate-shap-button" onclick="generateShapPlot()" class="generate-shap-button" data-i18n="generateShap">
-          ${t("generateShap")}
-        </button>
-        <div id="training-spinner-shap" class="spinner" style="display: none;"></div>
-      </div>
-    </div>
-    <div class="plot-card" id="shap-plots"></div>`;
-
-
-  explainabilityHTML += `</div>`; // End Model Explainability
-  resultsDiv.innerHTML += explainabilityHTML;
 
   resultsDiv.style.display = 'block';
 
@@ -1209,13 +1593,13 @@ function renderTrainingResults(data) {
       <h3 data-i18n="downloadSection">${t("downloadSection") || "Downloads"}</h3>
       <div class="download-buttons-container">
         <a id="download-link" href="${data.download_url || "#"}" data-i18n="downloadModel" class="download-button download-model" download>
-          ŠYõ’ ${t("downloadModel")}
+          📥 ${t("downloadModel")}
         </a>
         <button class="download-button download-plots" onclick="downloadAllPlots()" data-i18n="downloadPlots">
-          ŠY"S ${t("downloadPlots")}
+          📊 ${t("downloadPlots")}
         </button>
         <button class="download-button download-pdf" onclick="downloadPDF()" data-i18n="downloadPDF">
-          ŠY"" ${t("downloadPDF")}
+          📄 ${t("downloadPDF")}
         </button>
       </div>
     `;
@@ -1229,7 +1613,6 @@ function renderShapResult(result){
 
   const plotCard = document.getElementById("shap-plots");
   plotCard.innerHTML = `
-    <h4 data-i18n="shapSummary">${t("shapSummary")}</h4>
     <img src="data:image/png;base64,${tempShapPlot}" alt="SHAP Summary" />
   `;
 }
@@ -1238,9 +1621,9 @@ function resetShapButtons() {
   const button_generate = document.getElementById("generate-shap-button");
   const spinner = document.getElementById('training-spinner-shap');
 
-  button_generate.disabled = false;  
+  button_generate.disabled = false;
   button_generate.style.display = "inline-block";
-  spinner.style.display = "none";
+  if (spinner) spinner.style.display = "none";
 }
 
 // Generate SHAP plot for model explainability
@@ -1250,7 +1633,7 @@ async function generateShapPlot() {
     return;
   }
 
-  const shapRequestId = crypto.randomUUID(); 
+  const shapRequestId = crypto.randomUUID();
   currentShapRequestId = shapRequestId;
 
   const button_generate = document.getElementById("generate-shap-button");
@@ -1260,33 +1643,51 @@ async function generateShapPlot() {
   spinner.style.display = "inline-block";
 
   const formData = new FormData();
-  formData.append("model_path", lastTrainedModelPath);
+  formData.append("training_id", trainingId || '');
+  formData.append("model_path", lastTrainedModelPath || '');
   formData.append("target_column", lastUsedTargetColumn);
   formData.append("dataset", lastCleanedCsvBlob, "cleaned_data.csv");
 
   try {
-    const response = await fetch("/generate_shap_plot", {
-      method: "POST",
-      body: formData
-    });
-
+    const response = await fetch("/generate_shap_plot", { method: "POST", body: formData });
     if (!response.ok) {
       resetShapButtons();
       throw new Error(await response.text());
     }
 
-    const result = await response.json();
-    if (currentShapRequestId === shapRequestId) {
-      renderShapResult(result);
+    const { shap_id, error: initError } = await response.json();
+    if (initError) throw new Error(initError);
 
-      button_generate.style.display = "none";
-    }
+    // Poll until done
+    await new Promise((resolve, reject) => {
+      const interval = setInterval(async () => {
+        if (currentShapRequestId !== shapRequestId) {
+          clearInterval(interval);
+          return resolve();
+        }
+        try {
+          const pr = await fetch(`/shap_progress/${shap_id}`);
+          const data = await pr.json();
+
+          if (data.done) {
+            clearInterval(interval);
+            if (data.error) return reject(new Error(data.error));
+            renderShapResult(data.result);
+            button_generate.style.display = "none";
+            resolve();
+          }
+        } catch (e) {
+          clearInterval(interval);
+          reject(e);
+        }
+      }, 500);
+    });
 
   } catch (error) {
     showAlert(t("shapGenerationError") + ": " + error.message, "error");
-    resetShapButtons(); 
+    resetShapButtons();
   } finally {
-    spinner.style.display = "none"; 
+    spinner.style.display = "none";
   }
 }
 
@@ -1577,7 +1978,7 @@ async function runPrediction() {
 
       predictionResults.style.display = 'block';
     })
-    .catch(error => {
+    .catch(_ => {
       showAlert(t("predictionError"), 'error');
     });
 }
@@ -1672,12 +2073,15 @@ async function sendChat() {
         payload.plots_prediction_results = PlotsPredictionResults;
       }
       if (pngResultTrainingForPrediction) {
-        payload.png_result_training_for_prediction = {};
-        for (const entry of pngResultTrainingForPrediction) {
-          const base64 = await entry.async("base64");
-          const name = entry.name.split('/').pop(); // ex: 'accuracy_plot.png'
-          payload.png_result_training_for_prediction[name] = base64;
-        }
+        const entries = await Promise.all(
+          pngResultTrainingForPrediction.map(async entry => ({
+            name: entry.name.split('/').pop(),
+            base64: await entry.async("base64")
+          }))
+        );
+        payload.png_result_training_for_prediction = Object.fromEntries(
+          entries.map(e => [e.name, e.base64])
+        );
       }
     }
     const response = await fetch('/chat', {

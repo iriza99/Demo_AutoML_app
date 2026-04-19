@@ -1,6 +1,7 @@
 gunicorn
 flask
-autogluon==1.4.0
+autogluon.tabular==1.4.0
+autogluon.timeseries==1.4.0
 seaborn
 shap
 groq

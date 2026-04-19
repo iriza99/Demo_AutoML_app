@@ -1,8 +1,10 @@
 ﻿from autogluon.tabular import TabularPredictor, TabularDataset
 from autogluon.timeseries import TimeSeriesDataFrame, TimeSeriesPredictor
 import os
+import io
 import pandas as pd
 import matplotlib
+import matplotlib.patches as mpatches
 import logging
 import traceback
 
@@ -14,13 +16,52 @@ import base64
 import numpy as np
 import shap
 from datetime import datetime
-import io
-
 
 from sklearn.metrics import (
     accuracy_score, f1_score, roc_auc_score,
     mean_squared_error, r2_score, roc_curve, confusion_matrix, ConfusionMatrixDisplay
 )
+
+# Load a dataset from a file path or file-like object into a DataFrame.
+# Accepts .csv, .xls, .xlsx, .xlsm, and .arff files.
+def load_dataframe(source):
+    if hasattr(source, 'filename'):
+        # Flask FileStorage: read bytes, detect extension from filename
+        filename = source.filename
+        ext = os.path.splitext(filename)[1].lower()
+        raw = source.read()
+        if ext == '.csv':
+            return pd.read_csv(io.BytesIO(raw))
+        elif ext in ('.xls', '.xlsx', '.xlsm'):
+            return pd.read_excel(io.BytesIO(raw))
+        elif ext == '.arff':
+            from scipy.io import arff as scipy_arff
+            data, _ = scipy_arff.loadarff(io.StringIO(raw.decode('utf-8')))
+            df = pd.DataFrame(data)
+        else:
+            raise UserError("error_unsupported_file_format")
+    else:
+        # File path string
+        ext = os.path.splitext(source)[1].lower()
+        if ext == '.csv':
+            return pd.read_csv(source)
+        elif ext in ('.xls', '.xlsx', '.xlsm'):
+            return pd.read_excel(source)
+        elif ext == '.arff':
+            from scipy.io import arff as scipy_arff
+            data, _ = scipy_arff.loadarff(source)
+            df = pd.DataFrame(data)
+        else:
+            raise UserError("error_unsupported_file_format")
+
+    # Decode byte strings produced by scipy arff loader
+    for col in df.select_dtypes([object]).columns:
+        df[col] = df[col].apply(lambda x: x.decode('utf-8') if isinstance(x, bytes) else x)
+    return df
+
+
+# Cache for SHAP explainers keyed by model_path to avoid rebuilding on every request
+_shap_explainer_cache: dict = {}
 
 # Custom exception for user errors
 class UserError(Exception):
@@ -73,11 +114,23 @@ def generate_rmse_error_histogram_base64(y_true, y_pred, save_dir=None):
 
 # Generate a feature importance bar plot and return as base64 image
 def generate_feature_importance_plot(importances, save_dir=None):
-    plt.figure(figsize=(10, 6))
-    sns.barplot(x=importances['importance'], y=importances.index, palette='viridis')
+    # Keep only features with non-trivial importance; fall back to top-20 if all near zero
+    significant = importances[importances['importance'].abs() > 1e-6]
+    importances = (significant if not significant.empty else importances).head(20)
+    n = len(importances)
+    fig_height = max(4, n * 0.35)
+    plt.figure(figsize=(10, fig_height))
+
+    all_near_zero = importances['importance'].abs().max() < 1e-4
+    if all_near_zero:
+        plt.text(0.5, 0.5, 'Feature importance not available\n(all values ≈ 0)',
+                 ha='center', va='center', transform=plt.gca().transAxes, fontsize=13, color='gray')
+        plt.axis('off')
+    else:
+        sns.barplot(x=importances['importance'], y=importances.index, palette='viridis')
+        plt.xlabel('Importance')
+        plt.ylabel('Features')
     plt.title('Feature Importance')
-    plt.xlabel('Importance')
-    plt.ylabel('Features')
     plt.tight_layout()
 
     if save_dir:
@@ -148,8 +201,20 @@ def generate_metric_plot(metric_name, y_true=None, y_pred=None, y_proba=None, cl
     plt.close()
     return image_base64
 
+# Log exactly which Python and AutoGluon are being used by the Flask server
+import sys
+logging.info(f"Python executable: {sys.executable}")
+try:
+    import autogluon.tabular as _ag_tab
+    logging.info(f"AutoGluon tabular version: {_ag_tab.__version__}, location: {_ag_tab.__file__}")
+    logging.info(f"TabularPredictor has get_oof_pred: {hasattr(_ag_tab.TabularPredictor, 'get_oof_pred')}")
+except Exception as _e:
+    logging.warning(f"AutoGluon version check failed: {_e}")
+
 # Train an AutoGluon model and return training results and plots
-def train_model(df, target_column, time_limit, save_path, stop_event=None, time_column=None, prediction_length_percent=None):
+def train_model(df, target_column, time_limit, save_path, stop_event=None, time_column=None,
+                prediction_length_percent=None, eval_metric=None, excluded_model_types=None,
+                num_bag_folds=None, val_size=None):
     try:
         save_path = os.path.abspath(save_path)
 
@@ -162,102 +227,305 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
         # Time series branch
         if time_column:
             return train_model_timeseries(
-                df,
-                target_column,
-                time_column,
-                time_limit,
-                save_path,
-                stop_event,
-                plot_dir,
-                prediction_length_percent
+                df, target_column, time_column, time_limit, save_path, stop_event, plot_dir,
+                prediction_length_percent, eval_metric=eval_metric, excluded_model_types=excluded_model_types
             )
 
-        predictor = TabularPredictor(label=target_column, path=save_path)
+        # When bagging is disabled, split off a held-out validation set.
+        # AutoGluon trains on df_train; metrics and plots come from df_val (unseen).
+        df_val = None
+        df_train = df  # keep reference to training data for feature importance
+        if not num_bag_folds and val_size:
+            from sklearn.model_selection import train_test_split
+            df_train, df_val = train_test_split(
+                df, test_size=val_size, random_state=42,
+                stratify=df[target_column] if df[target_column].nunique() < 50 else None
+            )
+            logging.info(f"Validation split: {len(df_train)} train / {len(df_val)} val ({val_size*100:.0f}%)")
+            df = df_train  # train AutoGluon on the smaller set
+
+        predictor = TabularPredictor(label=target_column, path=save_path, eval_metric=eval_metric)
 
         if stop_event and stop_event.is_set():
             raise UserError("training_interrupted")
-        
-        predictor.fit(df, time_limit=time_limit)
+
+        fit_kwargs = {'time_limit': time_limit}
+        if excluded_model_types:
+            fit_kwargs['excluded_model_types'] = excluded_model_types
+        if num_bag_folds is not None:
+            fit_kwargs['num_bag_folds'] = num_bag_folds
+        if num_bag_folds:
+            # All rows participate in OOF evaluation — no holdout withheld.
+            fit_kwargs['use_bag_holdout'] = False
+        if df_val is not None:
+            # Tell AutoGluon to use the same val split for its own model selection,
+            # so leaderboard score_val and our metrics are on identical data.
+            fit_kwargs['tuning_data'] = df_val
+        try:
+            predictor.fit(df, **fit_kwargs)
+        except ValueError as ve:
+            if eval_metric and 'not a valid metric' in str(ve):
+                logging.warning(f"eval_metric '{eval_metric}' incompatible with detected task type, retrying without it.")
+                predictor = TabularPredictor(label=target_column, path=save_path)
+                fit_kwargs_retry = {k: v for k, v in fit_kwargs.items()}
+                predictor.fit(df, **fit_kwargs_retry)
+            else:
+                raise
+
+        # ── Capture OOF predictions right after fit() ────────────────────────────
+        # Used ONLY for plots (confusion matrix, ROC, F1 bar, RMSE scatter).
+        # Scalar metric values come from leaderboard(extra_metrics=...) instead.
+        _oof_pred = None        # predicted class labels (or regression values)
+        _oof_pred_proba = None  # probability DataFrame (classification only)
+
+        pt = predictor.problem_type
+
+        # predict_proba_oof → probability DataFrame → derive labels via argmax
+        _proba_method = getattr(predictor, 'predict_proba_oof', None)
+        if _proba_method is not None:
+            for _mkw in [{}, {'silent': True}]:
+                try:
+                    _raw = _proba_method(**_mkw)
+                    if pt == 'regression':
+                        _oof_pred = _raw
+                    elif isinstance(_raw, pd.DataFrame):
+                        _oof_pred_proba = _raw
+                        _oof_pred = _raw.idxmax(axis=1)
+                    else:  # binary Series of positive-class probabilities
+                        _oof_pred_proba = _raw
+                        pos = predictor.class_labels[1]
+                        neg = predictor.class_labels[0]
+                        _oof_pred = _raw.map(lambda p: pos if p >= 0.5 else neg)
+                    logging.info(f"OOF OK via predict_proba_oof({list(_mkw)}): {len(_oof_pred)} rows")
+                    break
+                except Exception as _e:
+                    logging.warning(f"predict_proba_oof({list(_mkw)}): {type(_e).__name__}: {_e}")
+
+        # If proba failed, fall back to predict_oof which returns labels directly
+        if _oof_pred is None:
+            _pred_method = getattr(predictor, 'predict_oof', None)
+            if _pred_method is not None:
+                for _mkw in [{}, {'silent': True}]:
+                    try:
+                        _oof_pred = _pred_method(**_mkw)
+                        logging.info(f"OOF OK via predict_oof({list(_mkw)}): {len(_oof_pred)} rows")
+                        break
+                    except Exception as _e:
+                        logging.warning(f"predict_oof({list(_mkw)}): {type(_e).__name__}: {_e}")
+
+        # When bagging is disabled: use explicit val split (unseen) if available,
+        # otherwise fall back to in-sample predictions.
+        if _oof_pred is None:
+            eval_df = df_val if df_val is not None else df
+            source = "validation set" if df_val is not None else "in-sample (no val split provided)"
+            logging.info(f"OOF unavailable — generating predictions on {source}.")
+            try:
+                X_plot = eval_df.drop(columns=[target_column])
+                if pt == 'regression':
+                    _oof_pred = predictor.predict(X_plot)
+                else:
+                    _raw = predictor.predict_proba(X_plot)
+                    if isinstance(_raw, pd.DataFrame):
+                        _oof_pred_proba = _raw
+                        _oof_pred = _raw.idxmax(axis=1)
+                    else:
+                        _oof_pred_proba = _raw
+                        pos = predictor.class_labels[1]
+                        neg = predictor.class_labels[0]
+                        _oof_pred = _raw.map(lambda p: pos if p >= 0.5 else neg)
+                _oof_pred.index = eval_df.index
+                if _oof_pred_proba is not None:
+                    _oof_pred_proba.index = eval_df.index
+                # Point df to eval_df so y_test_eval is taken from the right rows
+                df = eval_df
+                logging.info(f"Predictions generated: {len(_oof_pred)} rows")
+            except Exception as _e:
+                logging.warning(f"Prediction fallback failed: {_e}")
+        # ─────────────────────────────────────────────────────────────────────────
 
         if stop_event and stop_event.is_set():
             raise UserError("training_interrupted")
 
-        feature_importance_df = predictor.feature_importance(df)
+        feature_importance_df = predictor.feature_importance(df_train)
         feature_importance_plot = generate_feature_importance_plot(feature_importance_df, save_dir=plot_dir)
 
         leaderboard = predictor.leaderboard(silent=True)
         best_model = predictor.model_best
         task_type = predictor.problem_type
 
-        y_test = df[target_column]
-        y_pred = predictor.predict(df)
-        y_proba = predictor.predict_proba(df) if task_type == 'binary' else None
         class_labels = predictor.class_labels if hasattr(predictor, 'class_labels') else None
+        score_metric = predictor.eval_metric.name if hasattr(predictor.eval_metric, 'name') else str(predictor.eval_metric)
+
+        # ── Fetch all OOF scalar metrics via leaderboard(extra_metrics=[...]) ──────
+        # AutoGluon 1.3 computes these internally from the same OOF folds used during
+        # training. Values are returned in natural sign (positive RMSE, 0–1 accuracy).
+        # This is the most reliable approach — no need to call get_oof_pred* at all
+        # for scalar metrics.
+        if task_type == 'binary':
+            _extra_metrics = ['accuracy', 'balanced_accuracy', 'f1_macro', 'roc_auc',
+                              'precision_macro', 'recall_macro']
+        elif task_type == 'multiclass':
+            _extra_metrics = ['accuracy', 'balanced_accuracy', 'f1_macro',
+                              'precision_macro', 'recall_macro', 'roc_auc_ovo_macro']
+        else:
+            _extra_metrics = ['root_mean_squared_error', 'mean_absolute_error', 'r2']
+
+        try:
+            # extra_metrics are only requested when we have an explicit holdout val set.
+            # With bagging ON, score_val is already OOF-honest; passing training data to
+            # extra_metrics would evaluate in-sample (inflated). Secondary metrics for
+            # bagging mode are computed directly from _oof_pred further below instead.
+            if df_val is not None:
+                _lb_extra = predictor.leaderboard(data=df_val, extra_metrics=_extra_metrics, silent=True)
+            else:
+                _lb_extra = leaderboard  # no extra columns — fall through to _col_val → None
+            _best_row = _lb_extra[_lb_extra['model'] == best_model].iloc[0]
+            logging.info(f"leaderboard(extra_metrics) OK. Columns: {list(_lb_extra.columns)}")
+        except Exception as _e:
+            logging.warning(f"leaderboard(extra_metrics) failed: {type(_e).__name__}: {_e}. Using score_val only.")
+            _lb_extra = leaderboard
+            _best_row = leaderboard[leaderboard['model'] == best_model].iloc[0]
+
+        def _col_val(row, *names):
+            """Return the first column present and finite, else None."""
+            for n in names:
+                if n in row.index:
+                    try:
+                        v = float(row[n])
+                        if pd.notna(v):
+                            return v
+                    except Exception:
+                        pass
+            return None
+
+        # Fallback primary value from score_val with sign fix (used when extra_metrics
+        # column is absent or NaN).
+        _best_score_raw = float(leaderboard[leaderboard['model'] == best_model]['score_val'].values[0])
+        _em = predictor.eval_metric
+        _gib = getattr(_em, 'greater_is_better', None)
+        if _gib is None:
+            _gib = (1 == getattr(_em, 'sign', 1))
+        if _gib is None:
+            _gib = _best_score_raw >= 0
+        _primary_val_fallback = _best_score_raw if _gib else -_best_score_raw
+
+        # OOF predictions — used for plots only (not for scalar metric values).
+        oof_ok = False
+        y_pred = None
+        y_proba = None
+        y_test_eval = None
+
+        if _oof_pred is not None:
+            y_pred = _oof_pred
+            y_test_eval = df[target_column].loc[y_pred.index]
+            y_proba = _oof_pred_proba.loc[y_pred.index] if _oof_pred_proba is not None else None
+            oof_ok = True
+        else:
+            logging.warning("OOF predictions not available — plots will be skipped.")
 
         perf_data = {}
         summary = ""
 
         if task_type == 'binary':
-            # Binary classification metrics and plots
-            acc = accuracy_score(y_test, y_pred)
-            auc = roc_auc_score(y_test, y_proba[class_labels[1]])
+            if class_labels is None or len(class_labels) < 2:
+                raise UserError("error_unexpected_training")
+            _acc_raw = _col_val(_best_row, 'accuracy')
+            acc = _acc_raw if _acc_raw is not None else _primary_val_fallback
+            auc = _col_val(_best_row, 'roc_auc')
+            _pos_label = class_labels[1] if class_labels and len(class_labels) > 1 else None
+            # If extra_metrics didn't give AUC, compute from OOF probabilities
+            if auc is None and oof_ok and y_proba is not None and _pos_label is not None:
+                try:
+                    auc = float(roc_auc_score(y_test_eval, y_proba[_pos_label]))
+                except Exception as _e:
+                    logging.warning(f"roc_auc_score fallback failed: {_e}")
             perf_data = {
                 'accuracy': {
                     'value': acc,
-                    'plot': generate_metric_plot('accuracy', y_true=y_test, y_pred=y_pred, class_labels=class_labels, save_dir = plot_dir)
+                    'plot': generate_metric_plot('accuracy', y_true=y_test_eval, y_pred=y_pred,
+                                                 class_labels=class_labels, save_dir=plot_dir) if oof_ok else None
                 },
-                'roc_auc': {
-                    'value': auc,
-                    'plot': generate_metric_plot('roc_auc', y_true=y_test, y_proba=y_proba[class_labels[1]], class_labels=class_labels, save_dir = plot_dir)
-                }
             }
+            if auc is not None:
+                perf_data['roc_auc'] = {
+                    'value': auc,
+                    'plot': generate_metric_plot('roc_auc', y_true=y_test_eval,
+                                                 y_proba=y_proba[_pos_label] if (oof_ok and y_proba is not None and _pos_label is not None) else None,
+                                                 class_labels=class_labels, save_dir=plot_dir) if (oof_ok and y_proba is not None and _pos_label is not None) else None
+                }
             summary = f"Tâche détectée : classification binaire\n\n"
             summary += f"Modèle sélectionné : {best_model}\n"
             summary += f"Temps d'entraînement : {float(leaderboard['fit_time'].sum()):.2f} seconds\n\n"
-            summary += f"Résultat de la métrique accuracy : {perf_data['accuracy']['value']:.4f}\n"
-            summary += f"Résultat de la métrique ROC AUC : {perf_data['roc_auc']['value']:.4f}\n"
+            summary += f"Résultat de la métrique accuracy : {acc:.4f}\n"
+            summary += f"Résultat de la métrique ROC AUC : {auc:.4f}\n" if auc is not None else ""
 
         elif task_type == 'multiclass':
-            # Multiclass classification metrics and plots
-            acc = accuracy_score(y_test, y_pred)
-            f1 = f1_score(y_test, y_pred, average='macro')
+            _acc_raw = _col_val(_best_row, 'accuracy')
+            acc = _acc_raw if _acc_raw is not None else _primary_val_fallback
+            f1 = _col_val(_best_row, 'f1_macro')
+            # If extra_metrics didn't give F1, compute from OOF predictions
+            if f1 is None and oof_ok:
+                try:
+                    f1 = float(f1_score(y_test_eval, y_pred, average='macro'))
+                except Exception as _e:
+                    logging.warning(f"f1_score fallback failed: {_e}")
             perf_data = {
                 'accuracy': {
                     'value': acc,
-                    'plot': generate_metric_plot('accuracy', y_true=y_test, y_pred=y_pred, class_labels=class_labels, save_dir = plot_dir)
+                    'plot': generate_metric_plot('accuracy', y_true=y_test_eval, y_pred=y_pred,
+                                                 class_labels=class_labels, save_dir=plot_dir) if oof_ok else None
                 },
-                'f1_macro': {
-                    'value': f1,
-                    'plot': generate_metric_plot('f1_macro', y_true=y_test, y_pred=y_pred, class_labels=class_labels, save_dir = plot_dir)
-                }
             }
+            if f1 is not None:
+                perf_data['f1_macro'] = {
+                    'value': f1,
+                    'plot': generate_metric_plot('f1_macro', y_true=y_test_eval, y_pred=y_pred,
+                                                 class_labels=class_labels, save_dir=plot_dir) if oof_ok else None
+                }
             summary = f"Tâche détectée : classification multiclasse\n\n"
             summary += f"Modèle sélectionné : {best_model}\n"
             summary += f"Temps d'entraînement : {float(leaderboard['fit_time'].sum()):.2f} seconds\n\n"
-            summary += f"Résultat de la métrique accuracy : {perf_data['accuracy']['value']:.4f}\n"
-            summary += f"Résultat de la métrique F1 macro : {perf_data['f1_macro']['value']:.4f}\n"
+            summary += f"Résultat de la métrique accuracy : {acc:.4f}\n"
+            summary += f"Résultat de la métrique F1 macro : {f1:.4f}\n" if f1 is not None else ""
 
         elif task_type == 'regression':
-            # Regression metrics and plots
-            rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-            r2 = r2_score(y_test, y_pred)
+            rmse = _col_val(_best_row, 'root_mean_squared_error', 'rmse')
+            # AutoGluon stores error metrics negated in all leaderboard columns
+            if rmse is not None and rmse < 0:
+                rmse = -rmse
+            r2 = _col_val(_best_row, 'r2')
+            # Fallbacks: compute from OOF predictions or use score_val
+            if rmse is None:
+                if oof_ok:
+                    try:
+                        rmse = float(mean_squared_error(y_test_eval, y_pred) ** 0.5)
+                    except Exception as _e:
+                        logging.warning(f"rmse fallback failed: {_e}")
+                if rmse is None:
+                    rmse = _primary_val_fallback  # always has a value
+            if r2 is None and oof_ok:
+                try:
+                    r2 = float(r2_score(y_test_eval, y_pred))
+                except Exception as _e:
+                    logging.warning(f"r2_score fallback failed: {_e}")
+            if r2 is None and score_metric in ('r2', 'r2_score'):
+                r2 = _primary_val_fallback
             perf_data = {
-                'r2': {
-                    'value': r2
-                },
                 'rmse': {
                     'value': rmse,
-                    'plot': generate_metric_plot('rmse', y_true=y_test, y_pred=y_pred, save_dir = plot_dir),
-                    'plot_hist': generate_rmse_error_histogram_base64(y_true=y_test, y_pred=y_pred, save_dir = plot_dir)
+                    'plot': generate_metric_plot('rmse', y_true=y_test_eval, y_pred=y_pred,
+                                                 save_dir=plot_dir) if oof_ok else None,
+                    'plot_hist': generate_rmse_error_histogram_base64(y_true=y_test_eval, y_pred=y_pred,
+                                                                       save_dir=plot_dir) if oof_ok else None
                 }
             }
+            if r2 is not None:
+                perf_data['r2'] = {'value': r2}
             summary = f"Tâche détectée : regression\n\n"
             summary += f"Modèle sélectionné : {best_model}\n"
             summary += f"Temps d'entraînement : {float(leaderboard['fit_time'].sum()):.2f} seconds\n\n"
-            summary += f"Résultat de la métrique R2 : {perf_data['r2']['value']:.4f}\n"
-            summary += f"Résultat de la métrique RMSE : {perf_data['rmse']['value']:.4f}"
-
-        score_metric = predictor.eval_metric.name if hasattr(predictor.eval_metric, 'name') else str(predictor.eval_metric)
+            summary += f"Résultat de la métrique R2 : {r2:.4f}\n" if r2 is not None else ""
+            summary += f"Résultat de la métrique RMSE : {rmse:.4f}" if rmse is not None else ""
 
         results = {
             'best_model': best_model,
@@ -279,7 +547,8 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
         raise UserError("error_unexpected_training")
 
 
-def train_model_timeseries(df, target_column, time_column, time_limit, save_path, stop_event, plot_dir, prediction_length_percent=None):
+def train_model_timeseries(df, target_column, time_column, time_limit, save_path, stop_event, plot_dir,
+                           prediction_length_percent=None, eval_metric=None, excluded_model_types=None):
     # Ensure datetime
     try:
         df[time_column] = pd.to_datetime(df[time_column])
@@ -307,12 +576,18 @@ def train_model_timeseries(df, target_column, time_column, time_limit, save_path
         prediction_length=prediction_length,
         target="target",
         path=save_path,
+        eval_metric=eval_metric,
     )
 
     if stop_event and stop_event.is_set():
         raise UserError("training_interrupted")
 
-    predictor.fit(train_data=ts_df, time_limit=time_limit, presets="medium_quality")
+    fit_start = datetime.now()
+    ts_fit_kwargs = {'time_limit': time_limit, 'presets': 'medium_quality'}
+    if excluded_model_types:
+        ts_fit_kwargs['excluded_model_types'] = excluded_model_types
+    predictor.fit(train_data=ts_df, **ts_fit_kwargs)
+    fit_elapsed = (datetime.now() - fit_start).total_seconds()
 
     if stop_event and stop_event.is_set():
         raise UserError("training_interrupted")
@@ -335,35 +610,79 @@ def train_model_timeseries(df, target_column, time_column, time_limit, save_path
 
     # Plot using plain columns
     df_sorted = df.sort_values(time_column)
-    actual_time = df_sorted[time_column]
-    actual_values = df_sorted["target"]
+    actual_time = df_sorted[time_column].reset_index(drop=True)
+    actual_values = df_sorted["target"].reset_index(drop=True)
     forecast_time = forecasts.index.get_level_values("timestamp")
     forecast_values = forecast_series.to_numpy()
 
-    plt.figure(figsize=(8, 4))
-    plt.plot(actual_time, actual_values, label="Actual")
-    plt.plot(forecast_time, forecast_values, label="Forecast")
-    plt.legend()
-    plt.title("Forecast vs Actual")
+    total_len = len(actual_time)
+    train_end_idx = max(0, total_len - prediction_length - 1)
+    val_start_time = actual_time.iloc[total_len - prediction_length] if total_len > prediction_length else actual_time.iloc[0]
+    val_end_time = actual_time.iloc[-1]
+    forecast_start = forecast_time[0] if len(forecast_time) > 0 else val_end_time
+    forecast_end = forecast_time[-1] if len(forecast_time) > 0 else val_end_time
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+
+    # Background region shading
+    ax.axvspan(actual_time.iloc[0], actual_time.iloc[train_end_idx],
+               alpha=0.08, color='steelblue', label='_train_region')
+    ax.axvspan(val_start_time, val_end_time,
+               alpha=0.12, color='orange', label='_val_region')
+    ax.axvspan(forecast_start, forecast_end,
+               alpha=0.12, color='green', label='_forecast_region')
+
+    # Dummy patches for region legend entries
+    train_patch = mpatches.Patch(color='steelblue', alpha=0.3, label='Train')
+    val_patch = mpatches.Patch(color='orange', alpha=0.4, label='Validation')
+    fc_patch = mpatches.Patch(color='green', alpha=0.4, label='Forecast region')
+
+    ax.plot(forecast_time, forecast_values, color='tomato', linewidth=1.5, linestyle='--', label='Forecast', zorder=2)
+    ax.plot(actual_time, actual_values, color='steelblue', linewidth=1.5, label='Actual', zorder=3)
+
+    ax.set_xlabel(time_column, fontsize=10)
+    ax.set_ylabel(target_column, fontsize=10)
+    ax.set_title("Forecast vs Actual", fontsize=12)
+    ax.tick_params(axis='x', rotation=45)
+    plt.setp(ax.get_xticklabels(), ha='right', fontsize=8)
+
+    handles, labels = ax.get_legend_handles_labels()
+    # Remove the dummy axvspan entries (prefixed with _)
+    handles = [h for h, l in zip(handles, labels) if not l.startswith('_')]
+    labels = [l for l in labels if not l.startswith('_')]
+    handles += [train_patch, val_patch, fc_patch]
+    labels += ['Train', 'Validation', 'Forecast region']
+    ax.legend(handles, labels, fontsize=8, loc='best')
+
     plt.tight_layout()
     save_plot_to_disk(plt, plot_dir, "forecast_vs_actual.png")
     buffer = io.BytesIO()
-    plt.savefig(buffer, format='png')
+    fig.savefig(buffer, format='png', dpi=120)
     buffer.seek(0)
     forecast_plot_b64 = base64.b64encode(buffer.read()).decode("utf-8")
-    plt.close()
+    plt.close(fig)
 
     best_model_name = None
+    leaderboard_records = None
     try:
         lb = predictor.leaderboard(silent=True)
         if not lb.empty and 'model' in lb.columns:
             best_model_name = lb.iloc[0]['model']
-    except Exception:
-        best_model_name = None
+            # Rename columns to match tabular leaderboard format expected by the frontend
+            lb_out = lb[['model']].copy()
+            score_col = next((c for c in ['score_val', 'score', 'val_score'] if c in lb.columns), None)
+            fit_col   = next((c for c in ['fit_time', 'fit_time_marginal'] if c in lb.columns), None)
+            pred_col  = next((c for c in ['pred_time_val', 'predict_time', 'inference_time'] if c in lb.columns), None)
+            lb_out['score_val']     = lb[score_col].round(4) if score_col else None
+            lb_out['fit_time']      = lb[fit_col].round(2)   if fit_col   else None
+            lb_out['pred_time_val'] = lb[pred_col].round(4)  if pred_col  else None
+            leaderboard_records = lb_out.to_dict(orient='records')
+    except Exception as _e:
+        logging.warning(f"Time series leaderboard failed: {_e}")
 
     results = {
         "best_model": best_model_name,
-        "train_time": float(time_limit),
+        "train_time": fit_elapsed,
         "task_type": "timeseries",
         "metrics": {
             "mae": {"value": mae},
@@ -372,7 +691,7 @@ def train_model_timeseries(df, target_column, time_column, time_limit, save_path
         },
         "feature_importance_plot": None,
         "model_path": save_path,
-        "leaderboard": None,
+        "leaderboard": leaderboard_records,
         "summary_LLM": None,
         "forecast_plot": forecast_plot_b64,
         "prediction_length": prediction_length,
@@ -380,31 +699,87 @@ def train_model_timeseries(df, target_column, time_column, time_limit, save_path
     return results
 
 
+# Tree-based model class name keywords that support shap.TreeExplainer
+_TREE_MODEL_KEYWORDS = (
+    'ExtraTrees', 'RandomForest', 'XGBoost', 'XGB',
+    'LightGBM', 'LGBM', 'CatBoost', 'GradientBoosting', 'DecisionTree',
+)
+
+def _unwrap_ag_model(ag_model):
+    """Extract the raw sklearn/xgb/lgb estimator from an AutoGluon model wrapper.
+    Returns None if the structure is not recognised."""
+    try:
+        raw = ag_model
+        # BaggedEnsembleModel stores fold models in .models
+        if hasattr(raw, 'models') and raw.models:
+            raw = raw.models[0]
+        # Most AutoGluon wrappers store the actual estimator in .model
+        if hasattr(raw, 'model'):
+            return raw.model
+        # Return raw itself as a last attempt (may already be an sklearn estimator)
+        return raw
+    except Exception:
+        pass
+    return None
+
+
+def _build_shap_explainer(predictor, X):
+    """Return the fastest SHAP explainer available for this predictor.
+
+    Prefers shap.TreeExplainer (milliseconds) when the best base model is a
+    tree ensemble; falls back to shap.Explainer (PermutationExplainer, slow)
+    otherwise.
+    """
+    trainer = predictor._trainer
+
+    # Find best non-ensemble model (WeightedEnsemble wraps others, not a tree itself)
+    try:
+        lb = trainer.leaderboard(silent=True)
+        non_ens = lb[~lb['model'].str.contains('WeightedEnsemble', na=False)]
+        best_base_name = non_ens.iloc[0]['model']
+        base_model = trainer.load_model(best_base_name)
+    except Exception:
+        base_model = trainer.load_model(trainer.model_best)
+
+    raw = _unwrap_ag_model(base_model)
+    if raw is not None and any(k in type(raw).__name__ for k in _TREE_MODEL_KEYWORDS):
+        try:
+            explainer = shap.TreeExplainer(raw)
+            explainer(X.iloc[:1])          # quick smoke-test
+            logging.info(f"SHAP: using TreeExplainer with {type(raw).__name__}")
+            return explainer
+        except Exception as exc:
+            logging.warning(f"TreeExplainer failed ({exc}), falling back to PermutationExplainer")
+
+    # Universal fallback — slow but works with any model
+    best_model = trainer.load_model(trainer.model_best)
+    if predictor.problem_type in ('binary', 'multiclass'):
+        fn = best_model.predict_proba
+    else:
+        fn = best_model.predict
+    logging.info("SHAP: using PermutationExplainer (generic fallback)")
+    return shap.Explainer(fn, X)
+
+
 # Generate SHAP summary plot for model explanations
 def generate_shap_plot(model_path, df, target_column):
     try:
         predictor = TabularPredictor.load(model_path)
-        model = predictor._trainer.load_model(predictor._trainer.model_best)
 
         if target_column not in df.columns:
             raise UserError("error_missing_target_column")
 
         X = df.drop(columns=[target_column])
+        X = X.sample(n=min(100, len(X)))
 
-        X = X.sample(n=min(100, len(X)), random_state=42)  
-
-        # SHAP explainer for classification or regression
-        if predictor.problem_type in ["binary", "multiclass"]:
-            explainer = shap.Explainer(model.predict_proba, X)
-        else:
-            explainer = shap.Explainer(model.predict, X)
+        if model_path not in _shap_explainer_cache:
+            _shap_explainer_cache[model_path] = _build_shap_explainer(predictor, X)
+        explainer = _shap_explainer_cache[model_path]
 
         shap_values = explainer(X)
         shap_summary_plot = shap_plot_to_base64(shap.summary_plot, shap_values, X)
 
-        return {
-            'shap_summary_plot': shap_summary_plot,
-        }
+        return {'shap_summary_plot': shap_summary_plot}
 
     except UserError:
         raise
@@ -479,18 +854,7 @@ def predict_model(csv_path, model_path):
     try:
         predictor = TabularPredictor.load(model_path)
 
-        ext = os.path.splitext(csv_path)[1].lower()
-        if ext == '.csv':
-            df = pd.read_csv(csv_path)
-        elif ext in ['.xls', '.xlsx', '.xlsm']:
-            df = pd.read_excel(csv_path)
-        elif ext == '.arff':
-            import arff
-            with open(csv_path, 'r') as f:
-                arff_data = arff.load(f)
-            df = pd.DataFrame(arff_data['data'], columns=[a[0] for a in arff_data['attributes']])
-        else:
-            raise UserError("error_unsupported_file_format")
+        df = load_dataframe(csv_path)
 
         # Remove target column if present
         if predictor.label in df.columns:

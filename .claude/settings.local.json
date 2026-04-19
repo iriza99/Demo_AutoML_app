@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:auto.gluon.ai)",
+      "WebSearch",
+      "Bash(conda run:*)",
+      "Bash(echo \"exit: $?\")"
+    ]
+  }
+}

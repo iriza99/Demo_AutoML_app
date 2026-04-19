@@ -32,6 +32,14 @@
             <option value="es">Español</option>
           </select>
         </div>
+        <div class="menu-group">
+          <label class="dark-mode-label">
+            🌙 <span data-i18n="darkMode">Dark mode</span>
+            <span class="dm-toggle-track" onclick="toggleDarkMode()">
+              <span class="dm-toggle-thumb" id="dm-thumb"></span>
+            </span>
+          </label>
+        </div>
       </div>
     </div> 
     <button id='toggle-chat-btn' onclick='toggleChatSidebar()' class='toggle-chat-button'>💬</button>
@@ -192,19 +200,56 @@
                 <select id="time-column"></select>
                 <span class="help-icon" title="" data-i18n="timeColumnTooltip">?</span>
               </div>
-              <div id="pred-len-container" class="form-row" style="margin-bottom: 15px; display: none; align-items: center; gap: 10px;">
-                <label for="prediction-length-percent"><span data-i18n="predictionLength">Prediction horizon (% of data):</span></label>
-                <input type="range" id="prediction-length-percent" min="5" max="30" step="1" value="10" oninput="updatePredLenDisplay(event)">
-                <span id="pred-len-display">10%</span>
-                <span class="help-icon" title="" data-i18n="horizonTooltip">?</span>
-              </div>
-
               <!-- Training time -->
               <div class="slider-container form-row" style="margin-bottom: 15px; align-items: center; gap: 10px;">
                 <label for="training-time-limit" data-i18n="maxTime">Maximum training time:</label>
                 <input type="range" id="training-time-limit" min="5" max="180" step="5" value="60" oninput="updateTimeDisplay(event)">
                 <span id="time-limit-display">1h</span>
                 <span class="help-icon" title="" data-i18n="maxTimeTooltip">?</span>
+              </div>
+
+              <!-- Advanced Options -->
+              <div id="advanced-options-section" style="margin-bottom: 15px;">
+                <div onclick="toggleAdvancedOptions()" style="cursor:pointer; display:flex; align-items:center; gap:8px; user-select:none; color:#555; padding: 4px 0;">
+                  <span id="advanced-arrow" style="display:inline-block; transition:transform 0.2s; font-size:0.8em;">▶</span>
+                  <span style="font-weight:500;" data-i18n="advancedOptions">Advanced Options</span>
+                </div>
+                <div id="advanced-options-body" style="display:none; margin-top:10px; padding:14px; border:1px solid #ddd; border-radius:6px; background:#fafafa;">
+
+                  <!-- Main metric -->
+                  <div class="form-row" style="margin-bottom:12px; align-items:center; gap:10px;">
+                    <label style="min-width:140px;"><span data-i18n="evalMetric">Main metric:</span></label>
+                    <select id="adv-eval-metric" style="min-width:200px;"></select>
+                  </div>
+
+                  <!-- Models to use -->
+                  <div style="margin-bottom:12px;">
+                    <label style="display:block; margin-bottom:6px;"><span data-i18n="modelsToUse">Models to train:</span></label>
+                    <div id="adv-models-container" style="display:flex; flex-wrap:wrap; gap:6px;"></div>
+                  </div>
+
+                  <!-- Cross-validation (tabular only) -->
+                  <div id="adv-cv-container" class="form-row" style="align-items:center; gap:8px; margin-bottom:4px;">
+                    <input type="checkbox" id="adv-use-cv" checked onchange="toggleValSplit()">
+                    <label for="adv-use-cv"><span data-i18n="useCrossValidation">Use cross-validation (bagging)</span></label>
+                  </div>
+                  <!-- Validation split (shown only when CV is disabled) -->
+                  <div id="adv-val-split-container" style="display:none; margin-top:8px; align-items:center; gap:10px;" class="form-row">
+                    <label for="adv-val-size" style="white-space:nowrap;"><span data-i18n="valSplitLabel">Validation split:</span></label>
+                    <input type="range" id="adv-val-size" min="10" max="50" step="5" value="20"
+                           oninput="document.getElementById('adv-val-size-display').textContent = this.value + '%'">
+                    <span id="adv-val-size-display" style="min-width:36px; font-weight:600;">20%</span>
+                  </div>
+
+                  <!-- Prediction horizon (time series only, moved here) -->
+                  <div id="pred-len-container" class="form-row" style="display:none; align-items:center; gap:10px; margin-top:12px;">
+                    <label for="prediction-length-percent"><span data-i18n="predictionLength">Prediction horizon (% of data):</span></label>
+                    <input type="range" id="prediction-length-percent" min="5" max="30" step="1" value="10" oninput="updatePredLenDisplay(event)">
+                    <span id="pred-len-display">10%</span>
+                    <span class="help-icon" title="" data-i18n="horizonTooltip">?</span>
+                  </div>
+
+                </div>
               </div>
 
               <!-- Training -->
@@ -270,15 +315,53 @@
         </div>
       </div>
     </div>
-  <div id="training-overlay" class="training-overlay">
-    <div class="training-card">
-      <div class="training-spinner"></div>
-      <h3 class="training-title" data-i18n="trainingOverlayTitle">Entrenando modelo...</h3>
-      <p class="training-subtitle" data-i18n="trainingOverlaySubtitle">Esto puede tardar unos minutos.</p>
-      <div class="countdown-container">
-        <span class="countdown-label" data-i18n="countdownLabel">Tiempo restante:</span>
-        <span id="training-countdown" class="countdown-display">--:--</span>
+  <!-- Training Progress Panel (slides in from top-right) -->
+  <div id="training-panel" class="training-panel">
+    <div class="tp-header">
+      <div class="tp-status">
+        <span class="tp-pulse-dot"></span>
+        <span class="tp-title" data-i18n="trainingOverlayTitle">Training model…</span>
       </div>
+      <button class="tp-stop-btn" onclick="stopTraining()" title="Stop">
+        <i class="fas fa-stop-circle"></i>
+      </button>
+    </div>
+
+    <div class="tp-dataset-info">
+      <span id="tp-dataset-name" class="tp-info-pill"></span>
+      <span id="tp-target-col" class="tp-info-pill tp-info-pill--target"></span>
+    </div>
+
+    <div class="tp-timer-wrap">
+      <svg class="tp-ring" viewBox="0 0 100 100">
+        <defs>
+          <linearGradient id="tp-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#3b82f6"/>
+            <stop offset="100%" stop-color="#6366f1"/>
+          </linearGradient>
+        </defs>
+        <circle class="tp-ring-track" cx="50" cy="50" r="38"/>
+        <circle id="tp-ring-fill" class="tp-ring-fill" cx="50" cy="50" r="38"/>
+      </svg>
+      <div class="tp-timer-center">
+        <span id="training-countdown" class="tp-time">--:--</span>
+        <span class="tp-time-label" data-i18n="countdownLabel">remaining</span>
+      </div>
+    </div>
+
+    <div class="tp-progress-wrap">
+      <div class="tp-progress-bar">
+        <div id="tp-progress-fill" class="tp-progress-fill"></div>
+      </div>
+      <span id="tp-progress-pct" class="tp-progress-pct">0%</span>
+    </div>
+
+    <div class="tp-models-wrap">
+      <div class="tp-models-header">
+        <span data-i18n="modelsQueue">Models</span>
+        <span class="tp-models-hint" data-i18n="estimatedProgress">(estimated)</span>
+      </div>
+      <div id="tp-models-list" class="tp-models-list"></div>
     </div>
   </div>
   <div id="groq-modal" class="modal hidden">
