@@ -61,7 +61,6 @@ const ADVANCED_MODELS = {
     { value: "RF", label: "Random Forest" },
     { value: "XT", label: "Extra Trees" },
     { value: "NN_TORCH", label: "Neural net" },
-    { value: "FASTAI", label: "FastAI" },
   ],
   timeseries: [
     { value: "Naive", label: "Naive" },
@@ -899,29 +898,40 @@ function resetTrainingButtons() {
   stopProgress();
 }
 
+// Follows a training until it ends. One request at a time; short network cuts (common on
+// hosted spaces) are retried for about a minute before giving up.
 function pollTrainingResult(id) {
-  clearInterval(pollingIntervalTraining);
-  pollingIntervalTraining = setInterval(() => {
-    fetch(`/training_progress/${id}`).then(r => (r.ok ? r.json() : null)).then(p => { if (p) renderProgress(p); }).catch(() => {});
-    fetch(`/training_result/${id}`)
-      .then(res => (res.status === 202 ? null : res.json()))
-      .then((result) => {
-        if (!result) return;
-        clearInterval(pollingIntervalTraining);
-        pollingIntervalTraining = null;
-        resetTrainingButtons();
-        trainingTimeLimit = null;
+  clearTimeout(pollingIntervalTraining);
+  let failures = 0;
+  const finish = () => { pollingIntervalTraining = null; resetTrainingButtons(); trainingTimeLimit = null; };
+  const tick = async () => {
+    if (trainingId !== id) return;  // a newer training replaced this one
+    try {
+      const progress = await fetch(`/training_progress/${id}`).then(r => (r.ok ? r.json() : null)).catch(() => null);
+      if (progress) renderProgress(progress);
+      const res = await fetch(`/training_result/${id}`);
+      if (res.status === 202) {
+        failures = 0;
+      } else {
+        const result = await res.json();
+        finish();
         if (result.error === "training_interrupted") showAlert(t("trainingStopped"), "warning", 5000);
         else if (result.error) showAlert(t(result.error) !== result.error ? t(result.error) : t("trainingErrorGet"), "error");
         else renderTrainingResults(result);
         saveSession();
-      })
-      .catch(() => {
-        clearInterval(pollingIntervalTraining);
+        return;
+      }
+    } catch (_) {
+      failures += 1;
+      if (failures >= 40) {
+        finish();
         showAlert(t("trainingErrorNetwork"), "error");
-        resetTrainingButtons();
-      });
-  }, 1500);
+        return;
+      }
+    }
+    pollingIntervalTraining = setTimeout(tick, failures ? 2000 : 1500);
+  };
+  pollingIntervalTraining = setTimeout(tick, 800);
 }
 
 // ── Training progress (reported by AutoGluon, nothing simulated) ──────────────
@@ -1527,7 +1537,6 @@ async function generateShapPlot() {
   if (spinner) spinner.hidden = false;
   const formData = new FormData();
   formData.append("training_id", trainingId || "");
-  formData.append("model_path", lastTrainedModelPath || "");
   formData.append("target_column", lastUsedTargetColumn);
   formData.append("lang", currentLang());
   formData.append("dataset", lastCleanedCsvBlob, "cleaned_data.csv");

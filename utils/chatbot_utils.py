@@ -8,8 +8,19 @@ import logging
 import re
 import json
 
+def require_user_key():
+    """Public deployments (AUTOML_REQUIRE_USER_KEY=1): every user brings their own Groq key."""
+    return os.getenv('AUTOML_REQUIRE_USER_KEY', '0').strip().lower() in ('1', 'true', 'yes')
+
+
 def server_groq_key():
-    """Groq key from the environment (.env is loaded by app.py after this import)."""
+    """Groq key from the environment (.env is loaded by app.py after this import).
+
+    Never used when AUTOML_REQUIRE_USER_KEY is set, so a shared deployment cannot
+    spend the owner's quota.
+    """
+    if require_user_key():
+        return None
     return os.getenv('GROQ_API_KEY')
 
 

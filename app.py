@@ -4,7 +4,6 @@ from utils.chatbot_utils import handle_chat_request, server_groq_key
 from utils.report import build_report
 from datetime import datetime
 import shutil
-import zipfile
 from werkzeug.utils import secure_filename
 import pandas as pd
 from dotenv import load_dotenv
@@ -14,11 +13,18 @@ import threading
 import atexit
 from cleanup import cleanup_old_files
 from utils.training_progress import TrainingProgress
+from utils.model_signing import sign_model_dir, verify_and_extract, UntrustedModel
 from apscheduler.schedulers.background import BackgroundScheduler
 import os
 
+import time
 import traceback
 import uuid
+
+# Trainings that may run at the same time (each one uses every CPU core and several GB of RAM)
+MAX_CONCURRENT_TRAININGS = int(os.getenv('MAX_CONCURRENT_TRAININGS', '1'))
+# Finished results are kept this long so the page can fetch them again (e.g. after a reload)
+RESULT_TTL_SECONDS = 6 * 3600
 
 
 # Dictionaries to keep track of training threads and stop events
@@ -122,11 +128,43 @@ def preview_dataset(df, max_rows=5):
 def create_training_folder(dataset_filename, base_dir=MODEL_FOLDER):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     dataset_name = os.path.splitext(os.path.basename(dataset_filename))[0]
-    folder_name = f"{dataset_name}_{timestamp}"
-    zip_filename = f"model_{dataset_name}_{timestamp}.zip"
+    # The random part makes names unguessable and unique even for simultaneous uploads
+    token = uuid.uuid4().hex[:10]
+    folder_name = f"{dataset_name}_{timestamp}_{token}"
+    zip_filename = f"model_{dataset_name}_{timestamp}_{token}.zip"
     path = os.path.join(base_dir, folder_name)
     os.makedirs(path, exist_ok=True)
     return path, folder_name, zip_filename
+
+def _model_path_for(training_id):
+    """Model folder of a training run, resolved on the server only (never a client-supplied path)."""
+    if training_id in _trained_model_paths:
+        return _trained_model_paths[training_id]
+    name = secure_filename(training_id or '')
+    if not name:
+        return None
+    root = os.path.realpath(MODEL_FOLDER)
+    path = os.path.realpath(os.path.join(root, name))
+    if path.startswith(root + os.sep) and os.path.isdir(path):
+        return path
+    return None
+
+
+def _purge_old_state():
+    """Forget finished runs and SHAP tasks after a while so memory does not grow."""
+    now = time.time()
+    for tid, result in list(training_results.items()):
+        if now - result.get('finished_at', now) > RESULT_TTL_SECONDS:
+            training_results.pop(tid, None)
+            training_progress.pop(tid, None)
+            _trained_model_paths.pop(tid, None)
+    for sid, task in list(_shap_tasks.items()):
+        if task.get('done') and now - task.get('finished_at', now) > 3600:
+            _shap_tasks.pop(sid, None)
+
+
+scheduler.add_job(_purge_old_state, 'interval', minutes=30)
+
 
 @app.route('/')
 def index():
@@ -163,8 +201,12 @@ def train():
             except (ValueError, TypeError):
                 val_size = 0.20
 
-        filename = secure_filename(file.filename)
-        path = os.path.join(UPLOAD_FOLDER, filename)
+        running = [t for t in training_threads.values() if t.is_alive()]
+        if len(running) >= MAX_CONCURRENT_TRAININGS:
+            raise UserError("error_training_busy", 429)
+
+        filename = secure_filename(file.filename) or "dataset.csv"
+        path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4().hex[:10]}_{filename}")
         file.save(path)
         logger.debug(f"File received: {filename}")
 
@@ -194,6 +236,7 @@ def train():
                                      num_bag_folds=num_bag_folds, val_size=val_size, progress=progress,
                                      lang=lang)
                 zip_path = os.path.join(MODEL_FOLDER, zip_filename)
+                sign_model_dir(training_folder)
                 shutil.make_archive(base_name=zip_path.replace('.zip', ''), format='zip', root_dir=training_folder)
                 logger.info(f"Model compressed and saved: {zip_filename}")
                 metrics['download_url'] = f"/download_model/{zip_filename}"
@@ -205,6 +248,7 @@ def train():
                     _trained_model_paths[training_id] = metrics['model_path']
 
                 progress.set_phase('done')
+                metrics['finished_at'] = time.time()
                 training_results[training_id] = metrics
                 logger.info(f"Training successfully completed for {training_id}.")
 
@@ -212,13 +256,13 @@ def train():
                 stop_events.pop(training_id, None)
             except UserError as ue:
                 logger.warning(f"User error in training thread: {ue.message_key}")
-                training_results[training_id] = {"error": ue.message_key}
+                training_results[training_id] = {"error": ue.message_key, "finished_at": time.time()}
                 training_threads.pop(training_id, None)
                 stop_events.pop(training_id, None)
             except Exception as e:
                 logger.exception(f"Error in training thread")
                 # Report the failure so the client stops polling
-                training_results[training_id] = {"error": "error_training_failed"}
+                training_results[training_id] = {"error": "error_training_failed", "finished_at": time.time()}
                 training_threads.pop(training_id, None)
                 stop_events.pop(training_id, None)
 
@@ -239,12 +283,13 @@ def train():
 @app.route('/training_result/<training_id>', methods=['GET'])
 def get_training_result(training_id):
     # Return training result if available, else 202 Accepted
+    # Results are not removed when read: a lost response or a page reload can ask again
     if training_id in training_results:
-        result = training_results.pop(training_id)
-        training_progress.pop(training_id, None)
-        return jsonify(result)
-    else:
-        return '', 202  
+        return jsonify(training_results[training_id])
+    if training_id in training_threads or training_id in training_progress:
+        return '', 202
+    # Unknown id: the server restarted (or the result expired) while the page was waiting
+    return jsonify({"error": "error_training_lost"}), 404
 
     
 @app.route('/training_progress/<training_id>', methods=['GET'])
@@ -301,8 +346,7 @@ def shap_plot():
         df = load_dataframe(file)
         target_column = request.form.get('target_column')
 
-        training_id_req = request.form.get('training_id', '')
-        model_path = _trained_model_paths.get(training_id_req) or request.form.get('model_path', '')
+        model_path = _model_path_for(request.form.get('training_id', ''))
 
         if not model_path or not os.path.exists(model_path):
             raise UserError("error_invalid_model_path")
@@ -316,10 +360,10 @@ def shap_plot():
         def _worker():
             try:
                 result = generate_shap_plot(model_path, df, target_column, lang=lang)
-                _shap_tasks[shap_id].update({'progress': 100, 'done': True, 'result': result})
+                _shap_tasks[shap_id].update({'progress': 100, 'done': True, 'result': result, 'finished_at': time.time()})
                 logger.info("SHAP plot generated successfully.")
             except Exception as exc:
-                _shap_tasks[shap_id].update({'done': True, 'error': str(exc)})
+                _shap_tasks[shap_id].update({'done': True, 'error': str(exc), 'finished_at': time.time()})
                 logger.error(f"SHAP worker error: {traceback.format_exc()}")
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -360,7 +404,7 @@ def predict():
         # Create unique identifier for prediction session
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         dataset_name = os.path.splitext(secure_filename(dataset_file.filename))[0]
-        identifier = f"{timestamp}_{dataset_name}"
+        identifier = f"{timestamp}_{dataset_name}_{uuid.uuid4().hex[:10]}"
 
         file_ext = os.path.splitext(dataset_file.filename)[1].lower()
         original_filename = f"{identifier}{file_ext}"
@@ -372,15 +416,19 @@ def predict():
         os.makedirs(decompression_folder, exist_ok=True)
         zip_path = os.path.join(decompression_folder, "model.zip")
         model_zip.save(zip_path)
+        model_dir = os.path.join(decompression_folder, "model")
+        os.makedirs(model_dir, exist_ok=True)
 
+        # Models are pickles: only load ZIPs signed by this server (see utils/model_signing.py)
         try:
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(decompression_folder)
-        except zipfile.BadZipFile:
-            raise UserError("error_invalid_zip")
+            verify_and_extract(zip_path, model_dir)
+        except UntrustedModel as exc:
+            logger.warning(f"Rejected model ZIP for prediction: {exc}")
+            shutil.rmtree(decompression_folder, ignore_errors=True)
+            raise UserError("error_model_not_trusted")
 
         # Run prediction
-        result = predict_model(file_path, decompression_folder, lang=request.form.get('lang', 'en'))
+        result = predict_model(file_path, model_dir, lang=request.form.get('lang', 'en'))
         predictions = result['predictions']
         plots = result['plots']
 

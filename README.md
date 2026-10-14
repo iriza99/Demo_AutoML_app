@@ -1,3 +1,14 @@
+---
+title: AutoML Assistant
+emoji: 📈
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+short_description: Train, evaluate and explain ML models without code
+---
+
 # AutoML Assistant
 
 A user-friendly web interface to train, evaluate, and deploy machine learning models on any tabular or time series dataset — no data science background required. Powered by [AutoGluon](https://auto.gluon.ai/) with a conversational LLM assistant to guide you through every step.
@@ -54,6 +65,27 @@ A user-friendly web interface to train, evaluate, and deploy machine learning mo
 
 ---
 
+## Deploy on Hugging Face Spaces
+
+The repository is ready for a [Docker Space](https://huggingface.co/docs/hub/spaces-sdks-docker): the `Dockerfile` installs a CPU build of PyTorch and the pinned requirements and starts gunicorn on port 7860, and the block at the top of this README is the Space configuration.
+
+1. On huggingface.co: **New Space** → name it → **SDK: Docker** (blank template) → hardware *CPU basic* (free) or *CPU upgrade* → create.
+2. In the Space: **Settings → Variables and secrets → New secret** `AUTOML_SECRET_KEY` with a long random value (e.g. the output of `python -c "import secrets; print(secrets.token_hex(32))"`). It signs the trained models; without it, models downloaded before a restart cannot be used to predict.
+3. Push the code (from the project folder; use a Hugging Face *write* token as the password):
+   ```bash
+   git remote add space https://huggingface.co/spaces/<user>/<space-name>
+   git push space claude/wizardly-curie-egb6z4:main
+   ```
+   The first build takes about 10–15 minutes. Later pushes rebuild automatically.
+
+What the public image does differently from running it locally:
+
+- **Each user enters their own Groq key** (`AUTOML_REQUIRE_USER_KEY=1`); a `GROQ_API_KEY` on the server is never used, so nobody spends your quota. The key stays in the user's browser.
+- **One training at a time** (`MAX_CONCURRENT_TRAININGS=1`): a second user is asked to retry in a few minutes. Each training uses every CPU core.
+- **Only models trained by this app can be used to predict.** Models are Python pickles, and loading one runs code, so every trained model is signed and an uploaded ZIP is loaded only if its signature and files check out.
+- **Storage is temporary**: uploads and predictions are deleted after 1 h, models after 24 h, and everything when the Space restarts or sleeps (after 48 h without visits on free hardware). Results already on screen stay in the user's browser.
+- Do not upload identifiable patient data to a public Space.
+
 ## Installation
 
 ### Prerequisites
@@ -94,6 +126,9 @@ Optional settings (all can go in `.env`):
 | `AUTOML_GPU` | `auto` | `auto` trains XGBoost, CatBoost and the neural networks on the GPU when PyTorch sees one; `0` forces CPU. |
 | `AUTOML_PARALLEL_FOLDS` | `0` | `1` fits cross-validation folds in parallel with Ray. Faster, but in a long-running server later trainings can lose most models to Ray "Broken pipe" errors. |
 | `MAX_UPLOAD_MB` | `500` | Maximum upload size (trained model ZIPs are usually 10–50 MB). |
+| `AUTOML_SECRET_KEY` | random, saved in `.secret_key` | Signs trained models; only signed models are accepted for prediction. Keep it stable. |
+| `AUTOML_REQUIRE_USER_KEY` | `0` | `1` makes every user enter their own Groq key; `GROQ_API_KEY` is then ignored. |
+| `MAX_CONCURRENT_TRAININGS` | `1` | Trainings allowed at the same time. |
 
 **Using an NVIDIA GPU.** On Windows, `pip` installs a CPU-only PyTorch by default. Install a CUDA build that matches your driver, for example
 `pip install torch --index-url https://download.pytorch.org/whl/cu124`, and check it with
@@ -102,8 +137,11 @@ Optional settings (all can go in `.env`):
 ### Run
 
 ```bash
-flask run
+python app.py            # development
+gunicorn --workers 1 --threads 8 --timeout 600 -b 0.0.0.0:5000 app:app   # production (Linux)
 ```
+
+Use a single worker: training state lives in memory.
 
 Open [http://127.0.0.1:5000](http://127.0.0.1:5000) in your browser.
 

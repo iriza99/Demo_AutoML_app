@@ -183,8 +183,14 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
             raise UserError("training_interrupted")
 
         fit_kwargs = {'time_limit': time_limit}
-        if excluded_model_types:
-            fit_kwargs['excluded_model_types'] = excluded_model_types
+        excluded = list(excluded_model_types or [])
+        try:
+            import fastai  # noqa: F401
+        except ImportError:
+            # Not installed (it is optional): skip it instead of letting it fail on every training
+            excluded.append('FASTAI')
+        if excluded:
+            fit_kwargs['excluded_model_types'] = sorted(set(excluded))
         if num_bag_folds is not None:
             fit_kwargs['num_bag_folds'] = num_bag_folds
         if num_bag_folds:

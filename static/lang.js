@@ -336,6 +336,9 @@ const translations = {
     agoDays: "{n} days ago",
     modelMissing: "The trained model is no longer on the server (models are kept for 24 h). The results are still here; train again to download it, predict or see the effect of each variable.",
     modelMissingShap: "Not available: the model is no longer on the server. Train again to compute it.",
+    error_model_not_trusted: "This model cannot be used: only models trained in this app (and not modified) are accepted, for security. Train it here and use the downloaded ZIP.",
+    error_training_busy: "Another training is running on the server. Try again in a few minutes.",
+    error_training_lost: "The server lost this training (it was restarted or the result expired). Please train again.",
   },
 
   es: {
@@ -674,6 +677,9 @@ const translations = {
     agoDays: "hace {n} días",
     modelMissing: "El modelo entrenado ya no está en el servidor (se guardan 24 h). Los resultados siguen aquí; vuelve a entrenar para descargarlo, predecir o ver el efecto de cada variable.",
     modelMissingShap: "No disponible: el modelo ya no está en el servidor. Vuelve a entrenar para calcularlo.",
+    error_model_not_trusted: "No se puede usar este modelo: por seguridad solo se aceptan modelos entrenados en esta app y sin modificar. Entrénalo aquí y usa el ZIP descargado.",
+    error_training_busy: "Hay otro entrenamiento en marcha en el servidor. Vuelve a intentarlo en unos minutos.",
+    error_training_lost: "El servidor ha perdido este entrenamiento (se reinició o el resultado caducó). Vuelve a entrenar.",
   },
 
   fr: {
@@ -1012,5 +1018,8 @@ const translations = {
     agoDays: "il y a {n} jours",
     modelMissing: "Le modèle entraîné n'est plus sur le serveur (conservé 24 h). Les résultats restent visibles ; relancez l'entraînement pour le télécharger, prédire ou voir l'effet de chaque variable.",
     modelMissingShap: "Indisponible : le modèle n'est plus sur le serveur. Relancez l'entraînement pour le calculer.",
+    error_model_not_trusted: "Ce modèle ne peut pas être utilisé : par sécurité, seuls les modèles entraînés dans cette application (et non modifiés) sont acceptés. Entraînez-le ici et utilisez le ZIP téléchargé.",
+    error_training_busy: "Un autre entraînement est en cours sur le serveur. Réessayez dans quelques minutes.",
+    error_training_lost: "Le serveur a perdu cet entraînement (redémarrage ou résultat expiré). Relancez l'entraînement.",
   },
 };

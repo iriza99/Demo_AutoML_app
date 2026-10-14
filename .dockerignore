@@ -1,0 +1,14 @@
+.git
+.github
+**/__pycache__
+.pytest_cache
+.env
+.secret_key
+logs/
+models/
+uploads/
+decompression/
+prediction/
+pdf_summary/
+tests/
+*.log

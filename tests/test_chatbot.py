@@ -121,3 +121,13 @@ def test_json_action_in_text_becomes_a_card():
     chatbot.Groq = JsonText
     out = chatbot.handle_chat_request({"message": "iniciar", "groq_api_key": "k", "app_state": STATE})
     assert out == {"response": "Pulsa **Entrenar modelo**.", "actions": [{"name": "start_training", "args": {}}]}
+
+
+def test_public_mode_never_uses_the_server_key(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "owner-key")
+    assert chatbot.server_groq_key() == "owner-key"
+    monkeypatch.setenv("AUTOML_REQUIRE_USER_KEY", "1")
+    assert chatbot.server_groq_key() is None
+    with pytest.raises(ValueError, match="groqMissing"):
+        chatbot.handle_chat_request({"message": "hola"})
+    chatbot.handle_chat_request({"message": "hola", "groq_api_key": "user-key"})
