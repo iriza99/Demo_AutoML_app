@@ -103,9 +103,10 @@ function updateAdvancedOptions() {
 
   const taskType = isTimeSeries ? 'timeseries' : (isNumeric ? 'regression' : 'classification');
 
-  // Metric dropdown
+  // Metric dropdown (keep the user's choice when it is still valid for the task)
   const metricSelect = document.getElementById('adv-eval-metric');
   if (metricSelect) {
+    const previousMetric = metricSelect.value;
     metricSelect.innerHTML = '';
     ADVANCED_METRICS[taskType].forEach(m => {
       const opt = document.createElement('option');
@@ -113,12 +114,18 @@ function updateAdvancedOptions() {
       opt.textContent = m.label;
       metricSelect.appendChild(opt);
     });
+    if (ADVANCED_METRICS[taskType].some(m => m.value === previousMetric)) {
+      metricSelect.value = previousMetric;
+    }
   }
 
   // Model checkboxes
   const modelList = isTimeSeries ? ADVANCED_MODELS.timeseries : ADVANCED_MODELS.tabular;
   const container = document.getElementById('adv-models-container');
   if (container) {
+    const previouslyUnchecked = new Set(
+      Array.from(container.querySelectorAll('input[type="checkbox"]:not(:checked)')).map(cb => cb.value)
+    );
     container.innerHTML = '';
     modelList.forEach(m => {
       const lbl = document.createElement('label');
@@ -127,7 +134,7 @@ function updateAdvancedOptions() {
       cb.type = 'checkbox';
       cb.value = m.value;
       cb.name = 'adv-model';
-      cb.checked = true;
+      cb.checked = !previouslyUnchecked.has(m.value);
       lbl.appendChild(cb);
       lbl.appendChild(document.createTextNode(m.label));
       container.appendChild(lbl);

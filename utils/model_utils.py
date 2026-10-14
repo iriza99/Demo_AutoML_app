@@ -112,6 +112,24 @@ def generate_rmse_error_histogram_base64(y_true, y_pred, save_dir=None):
 
     return image_base64
 
+def _metric_or_fallback(value, name, score_metric, primary_value, oof_ok, y_true, y_pred):
+    """Resolve a scalar metric when the leaderboard has no column for it.
+
+    score_val only holds the *training* metric, so it can stand in for `name`
+    only when that is the metric AutoGluon optimised. Otherwise accuracy is
+    computed from the out-of-fold predictions.
+    """
+    if value is not None:
+        return value
+    if score_metric == name:
+        return primary_value
+    if name == 'accuracy' and oof_ok and y_pred is not None:
+        try:
+            return float(accuracy_score(y_true, y_pred))
+        except Exception as e:
+            logging.warning(f"accuracy_score fallback failed: {e}")
+    return None
+
 # Generate a feature importance bar plot and return as base64 image
 def generate_feature_importance_plot(importances, save_dir=None):
     # Keep only features with non-trivial importance; fall back to top-20 if all near zero
@@ -429,9 +447,11 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
         if task_type == 'binary':
             if class_labels is None or len(class_labels) < 2:
                 raise UserError("error_unexpected_training")
-            _acc_raw = _col_val(_best_row, 'accuracy')
-            acc = _acc_raw if _acc_raw is not None else _primary_val_fallback
+            acc = _metric_or_fallback(_col_val(_best_row, 'accuracy'), 'accuracy', score_metric,
+                                      _primary_val_fallback, oof_ok, y_test_eval, y_pred)
             auc = _col_val(_best_row, 'roc_auc')
+            if auc is None and score_metric == 'roc_auc':
+                auc = _primary_val_fallback
             _pos_label = class_labels[1] if class_labels and len(class_labels) > 1 else None
             # If extra_metrics didn't give AUC, compute from OOF probabilities
             if auc is None and oof_ok and y_proba is not None and _pos_label is not None:
@@ -439,13 +459,13 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
                     auc = float(roc_auc_score(y_test_eval, y_proba[_pos_label]))
                 except Exception as _e:
                     logging.warning(f"roc_auc_score fallback failed: {_e}")
-            perf_data = {
-                'accuracy': {
+            perf_data = {}
+            if acc is not None:
+                perf_data['accuracy'] = {
                     'value': acc,
                     'plot': generate_metric_plot('accuracy', y_true=y_test_eval, y_pred=y_pred,
                                                  class_labels=class_labels, save_dir=plot_dir) if oof_ok else None
-                },
-            }
+                }
             if auc is not None:
                 perf_data['roc_auc'] = {
                     'value': auc,
@@ -456,12 +476,12 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
             summary = f"Tâche détectée : classification binaire\n\n"
             summary += f"Modèle sélectionné : {best_model}\n"
             summary += f"Temps d'entraînement : {float(leaderboard['fit_time'].sum()):.2f} seconds\n\n"
-            summary += f"Résultat de la métrique accuracy : {acc:.4f}\n"
+            summary += f"Résultat de la métrique accuracy : {acc:.4f}\n" if acc is not None else ""
             summary += f"Résultat de la métrique ROC AUC : {auc:.4f}\n" if auc is not None else ""
 
         elif task_type == 'multiclass':
-            _acc_raw = _col_val(_best_row, 'accuracy')
-            acc = _acc_raw if _acc_raw is not None else _primary_val_fallback
+            acc = _metric_or_fallback(_col_val(_best_row, 'accuracy'), 'accuracy', score_metric,
+                                      _primary_val_fallback, oof_ok, y_test_eval, y_pred)
             f1 = _col_val(_best_row, 'f1_macro')
             # If extra_metrics didn't give F1, compute from OOF predictions
             if f1 is None and oof_ok:
@@ -469,13 +489,13 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
                     f1 = float(f1_score(y_test_eval, y_pred, average='macro'))
                 except Exception as _e:
                     logging.warning(f"f1_score fallback failed: {_e}")
-            perf_data = {
-                'accuracy': {
+            perf_data = {}
+            if acc is not None:
+                perf_data['accuracy'] = {
                     'value': acc,
                     'plot': generate_metric_plot('accuracy', y_true=y_test_eval, y_pred=y_pred,
                                                  class_labels=class_labels, save_dir=plot_dir) if oof_ok else None
-                },
-            }
+                }
             if f1 is not None:
                 perf_data['f1_macro'] = {
                     'value': f1,
@@ -485,7 +505,7 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
             summary = f"Tâche détectée : classification multiclasse\n\n"
             summary += f"Modèle sélectionné : {best_model}\n"
             summary += f"Temps d'entraînement : {float(leaderboard['fit_time'].sum()):.2f} seconds\n\n"
-            summary += f"Résultat de la métrique accuracy : {acc:.4f}\n"
+            summary += f"Résultat de la métrique accuracy : {acc:.4f}\n" if acc is not None else ""
             summary += f"Résultat de la métrique F1 macro : {f1:.4f}\n" if f1 is not None else ""
 
         elif task_type == 'regression':

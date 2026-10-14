@@ -123,9 +123,6 @@ class CompetenceModel:
                 self._update("domain", STRONG_HIGH, f"dropped late-information column {col}", ts)
             elif col in context.get("unit_mixed", set()):
                 self._update("domain", MODERATE_HIGH, f"dropped unit-mixed column {col}", ts)
-        elif etype == "tooltip_hover":
-            if self.counts[etype] <= 3:
-                self._update("ml", WEAK_LOW, "opened help tooltip", ts)
         elif etype == "shap_request":
             if self.counts[etype] == 1:
                 self._update("ml", WEAK_HIGH, "requested SHAP", ts)

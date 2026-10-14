@@ -15,6 +15,7 @@ const STUDY = (() => {
     dictionary: null,
     queue: [],
     trainOverride: false,
+    hasResults: false,
     submitted: false,
   };
 })();
@@ -46,6 +47,9 @@ const STUDY_TEXT = {
     submit: "Enviar",
     submitted: "Tarea enviada. Avisa al investigador.",
     needDeploy: "Indica si desplegarías el modelo.",
+    needIssues: "Describe los problemas que hayas visto, o escribe «ninguno».",
+    issuesPlaceholder: "Escribe «ninguno» si no has visto problemas",
+    needTraining: "Entrena al menos un modelo antes de finalizar la tarea.",
   },
   en: {
     task: "Task",
@@ -73,6 +77,9 @@ const STUDY_TEXT = {
     submit: "Submit",
     submitted: "Task submitted. Please tell the researcher.",
     needDeploy: "Please say whether you would deploy the model.",
+    needIssues: "Describe the problems you noticed, or write \"none\".",
+    issuesPlaceholder: "Write \"none\" if you did not notice any problem",
+    needTraining: "Train at least one model before finishing the task.",
   },
 };
 
@@ -275,7 +282,8 @@ function buildTaskBrief() {
 
 function openSubmitModal() {
   if (STUDY.submitted) return;
-  studyLog("submit_open");
+  studyLog("submit_open", { has_results: STUDY.hasResults });
+  if (!STUDY.hasResults) { showAlert(st("needTraining"), "warning"); return; }
   const overlay = el("div", { class: "study-overlay" });
   const box = el("div", { class: "study-modal" });
   box.appendChild(el("h3", { text: st("submitTitle") }));
@@ -292,7 +300,7 @@ function openSubmitModal() {
   conf.addEventListener("input", () => (confValue.textContent = conf.value));
   box.appendChild(el("div", { class: "study-options" }, [conf, confValue]));
   box.appendChild(el("p", { text: st("issuesQ") }));
-  const issues = el("textarea", { rows: "5", class: "study-textarea" });
+  const issues = el("textarea", { rows: "5", class: "study-textarea", placeholder: st("issuesPlaceholder") });
   box.appendChild(issues);
   const actions = el("div", { class: "study-actions" });
   actions.appendChild(el("button", { class: "neutral-button", type: "button", text: st("cancel"), onclick: () => overlay.remove() }));
@@ -301,6 +309,7 @@ function openSubmitModal() {
     onclick: async () => {
       const choice = box.querySelector('input[name="study-deploy"]:checked');
       if (!choice) { showAlert(st("needDeploy"), "warning"); return; }
+      if (issues.value.trim().length < 2) { showAlert(st("needIssues"), "warning"); return; }
       studyLog("task_submit", {
         deploy: choice.value === "yes", confidence: parseInt(conf.value, 10),
         issues_text: issues.value.trim(), final_state: currentUiState(),
@@ -308,6 +317,9 @@ function openSubmitModal() {
       STUDY.submitted = true;
       await studyFlush();
       overlay.remove();
+      // Nothing after submission should be mixed into the task data
+      document.getElementById("study-guidance")?.remove();
+      document.querySelector("#study-brief .study-finish")?.setAttribute("disabled", "disabled");
       showAlert(st("submitted"), "success");
     },
   }));
@@ -385,6 +397,7 @@ function instrumentApp() {
 
   wrapGlobal("renderTrainingResults", orig => function (data) {
     const result = orig.apply(this, arguments);
+    STUDY.hasResults = true;
     const metrics = {};
     Object.entries(data.metrics || {}).forEach(([k, v]) => {
       if (v && typeof v.value === "number") metrics[k] = v.value;
