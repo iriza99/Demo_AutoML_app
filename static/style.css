@@ -847,3 +847,6 @@ body.expert p.expert-only { display: block; }
 
 .target-suggest { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 select.is-empty { color: var(--text-muted); border-color: var(--primary); }
+.examples { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+.examples .chip-btn strong { font-weight: 650; }
+.notice { margin: 0; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text-muted); font-size: .9rem; }

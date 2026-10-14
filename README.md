@@ -14,6 +14,8 @@ A user-friendly web interface to train, evaluate, and deploy machine learning mo
 - **Expert mode** (settings) — technical details, configuration and every model tried, open by default
 - **LLM assistant** — answers questions about your data and results in plain language using the exact numbers behind every chart (including SHAP and predictions), remembers the conversation and can *propose* actions (exclude variables, change the target, metric or time, start training, open a results section). Each proposal appears as a card and only runs when you click *Apply*
 - **PDF report** — built from the app's own data, in the interface language, no assistant key needed
+- **Example datasets** — breast cancer (classification) and diabetes (regression) one click away on the start screen ([sources](static/examples/README.md))
+- **Picks up where you left off** — the dataset, settings and last results are kept in the browser (IndexedDB) and restored after a reload, also while a training is running; *Change file* starts from scratch. Trained models stay on the server for 24 h
 - **Dark mode** and multilingual UI (English, French, Spanish)
 - **Download** trained models, plots, a PDF report and predictions; predict straight away with the model you just trained
 

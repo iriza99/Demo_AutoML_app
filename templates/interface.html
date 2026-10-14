@@ -117,6 +117,16 @@
           <div class="card how-step"><span class="step-dot"><span>3</span></span><div><strong data-i18n="how3Title">Understand the results</strong><p class="muted" data-i18n="how3Text">Metrics, important variables and an assistant to explain them.</p></div></div>
         </div>
 
+        <div id="examples" class="examples">
+          <span class="muted" data-i18n="examplesTitle">No data at hand? Try an example:</span>
+          <button type="button" class="chip-btn" onclick="loadExample('breast_cancer.csv')">
+            <strong data-i18n="exampleBreast">Breast cancer</strong> <span class="muted" data-i18n="exampleBreastSub">· diagnosis, 569 patients</span>
+          </button>
+          <button type="button" class="chip-btn" onclick="loadExample('diabetes.csv')">
+            <strong data-i18n="exampleDiabetes">Diabetes</strong> <span class="muted" data-i18n="exampleDiabetesSub">· progression in 1 year, 442 patients</span>
+          </button>
+        </div>
+
         <div id="dataset-loaded" hidden>
           <div class="dataset-bar card">
             <div class="file-badge">

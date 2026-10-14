@@ -26,6 +26,7 @@ let datasetLoaded = false;
 let totalDataRows = 0;
 let lastTrainConfig = null;      // options used for the last training (shown in the technical details)
 let lastPredictionSummary = null;
+let trainingTimeLimit = null;    // seconds, while a training runs (to resume the progress view after a reload)
 let expertMode = (() => { try { return localStorage.getItem("expertMode") === "1"; } catch (_) { return false; } })();
 
 const STEP = { DATA: 1, TRAIN: 2, RESULTS: 3 };
@@ -186,6 +187,9 @@ window.addEventListener("DOMContentLoaded", () => {
 
   updateTimeDisplay();
   setWizardStep(STEP.DATA);
+  restoreSession();
+  // Keep the configuration too (variables, target, time, options) without saving on every keystroke
+  document.addEventListener("change", (e) => { if (e.target.closest("#training-section")) saveSession(); });
 });
 
 function initSettingsMenu() {
@@ -371,12 +375,23 @@ async function loadDataFile(file) {
     datasetFile = file;
     lastDatasetName = file.name;
     onDataLoaded(rows);
+    saveSession();
   } catch (err) {
     console.error(err);
     showAlert(t("pleaseSelectFile"), "warning");
     $("upload-csv").value = "";
   } finally {
     $("preview-loading").hidden = true;
+  }
+}
+
+async function loadExample(name) {
+  try {
+    const response = await fetch(`/static/examples/${name}`);
+    if (!response.ok) throw new Error(String(response.status));
+    await loadDataFile(new File([await response.blob()], name, { type: "text/csv" }));
+  } catch (_) {
+    showAlert(t("pleaseSelectFile"), "warning");
   }
 }
 
@@ -393,6 +408,7 @@ function onDataLoaded(rows) {
   $("csv-file-name").textContent = lastDatasetName;
   $("csv-dropzone").hidden = true;
   $("how-it-works").hidden = true;
+  $("examples").hidden = true;
   $("dataset-loaded").hidden = false;
 
   renderDatasetChips();
@@ -538,6 +554,8 @@ function removeCSVFile() {
   $("dataset-loaded").hidden = true;
   $("csv-dropzone").hidden = false;
   $("how-it-works").hidden = false;
+  $("examples").hidden = false;
+  clearSession();
   $("vars-table").innerHTML = "";
   $("preview-table").innerHTML = "";
   $("target-column").innerHTML = "";
@@ -560,7 +578,7 @@ function invalidateResults() {
 // ── Step 2 · Train ───────────────────────────────────────────────────────────
 // Likely outcome columns, offered as suggestions; the user always makes the choice
 function suggestTargets(header) {
-  const hints = /(target|label|outcome|class|result|diagnos|event|death|mortal|readmi|sepsis|status|survival|y$)/i;
+  const hints = /(target|label|outcome|class|result|diagnos|event|death|mortal|readmi|sepsis|status|survival|progression|y$)/i;
   const named = [...header].reverse().filter(h => hints.test(h));
   return [...new Set([...named, header[header.length - 1]])].slice(0, 3);
 }
@@ -854,6 +872,8 @@ function startTraining() {
         return;
       }
       trainingId = data.training_id;
+      trainingTimeLimit = Math.max(60, minutes * 60);
+      saveSession();
       pollTrainingResult(trainingId);
     })
     .catch(() => {
@@ -890,9 +910,11 @@ function pollTrainingResult(id) {
         clearInterval(pollingIntervalTraining);
         pollingIntervalTraining = null;
         resetTrainingButtons();
+        trainingTimeLimit = null;
         if (result.error === "training_interrupted") showAlert(t("trainingStopped"), "warning", 5000);
         else if (result.error) showAlert(t(result.error) !== result.error ? t(result.error) : t("trainingErrorGet"), "error");
         else renderTrainingResults(result);
+        saveSession();
       })
       .catch(() => {
         clearInterval(pollingIntervalTraining);
@@ -1273,14 +1295,15 @@ function renderTrainingResults(data, { silent = false } = {}) {
             ${data.used_gpu ? ' <span class="pill pill-ok">GPU</span>' : ""}</p>
         </div>
         <div class="verdict-actions">
-          <button class="btn btn-primary" type="button" onclick="useLastTrainedModel(true)">
+          ${data.model_missing ? "" : `<button class="btn btn-primary" type="button" onclick="useLastTrainedModel(true)">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>${t("predictWithModel")}</button>
           <a class="btn btn-secondary" href="${data.download_url || "#"}" download>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12M7 11l5 5 5-5M4 20h16"/></svg>${t("downloadModel")}</a>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12M7 11l5 5 5-5M4 20h16"/></svg>${t("downloadModel")}</a>`}
           <button class="btn btn-ghost" type="button" onclick="downloadPDF()">${t("downloadPDF")}</button>
         </div>
       </div>
       ${tiles ? `<div class="metric-strip">${tiles}</div>` : ""}
+      ${data.model_missing ? `<p class="notice">${t("modelMissing")}</p>` : ""}
       ${renderResultChecks(data, baseline)}
     </div>
     <nav class="section-nav" aria-label="${esc(t("stepResults"))}">
@@ -1386,6 +1409,7 @@ let shapSummary = null;
 function renderShapBlock() {
   if (shapSummary) return shapChart(shapSummary);
   if (shapPlot) return `<h4>${t("shapTitle")}</h4><img class="shap-img" src="data:image/png;base64,${shapPlot}" alt="shap_summary">`;
+  if (lastResult?.model_missing) return `<h4>${t("shapTitle")}</h4><p class="muted">${t("modelMissingShap")}</p>`;
   return `<h4>${t("shapTitle")}</h4>
     <p class="muted">${t("shapIntro")}</p>
     <div class="row-gap">
@@ -1522,6 +1546,7 @@ async function generateShapPlot() {
           if (data.error) { reject(new Error(data.error)); return; }
           shapPlot = data.result.shap_summary_plot;
           shapSummary = data.result.shap_summary || null;
+          saveSession();
           const box = $("res-shap");
           if (box) box.innerHTML = renderShapBlock();
           resolve();
@@ -2069,4 +2094,126 @@ function showAlert(message, type = "error", duration = 7000) {
   box.className = `toast toast-${type}`;
   clearTimeout(_toastTimer);
   _toastTimer = setTimeout(() => box.classList.add("hidden"), duration);
+}
+
+
+// ── Last analysis, kept in this browser (IndexedDB) so a reload does not lose it ─
+const SESSION_DB = "automl-assistant";
+let _saveTimer = null;
+let _restoring = false;
+
+function sessionStore(mode, fn) {
+  return new Promise((resolve, reject) => {
+    let request;
+    try { request = indexedDB.open(SESSION_DB, 1); } catch (err) { reject(err); return; }
+    request.onupgradeneeded = () => request.result.createObjectStore("kv");
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      const tx = db.transaction("kv", mode);
+      const req = fn(tx.objectStore("kv"));
+      tx.oncomplete = () => { db.close(); resolve(req?.result); };
+      tx.onerror = () => { db.close(); reject(tx.error); };
+    };
+  });
+}
+
+function saveSession() {
+  if (_restoring) return;
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(async () => {
+    if (!datasetFile) return;
+    const state = {
+      v: 1, savedAt: Date.now(), file: datasetFile, step: wizardCurrentStep,
+      dropped: getDroppedColumns(), target: $("target-column").value,
+      minutes: parseInt($("training-time-limit").value, 10), metric: $("adv-eval-metric").value,
+      cv: $("adv-use-cv").checked, valPct: parseInt($("adv-val-size").value, 10),
+      result: lastResult, usedTarget: lastUsedTargetColumn, cleanedCsv: lastCleanedCsvBlob,
+      preprocessing: dataPreprocessing, trainConfig: lastTrainConfig, shapPlot, shapSummary,
+      trainingId, trainingTimeLimit,
+    };
+    try { await sessionStore("readwrite", st => st.put(state, "last")); } catch (_) { /* storage unavailable */ }
+  }, 400);
+}
+
+async function clearSession() {
+  clearTimeout(_saveTimer);
+  try { await sessionStore("readwrite", st => st.delete("last")); } catch (_) { /* storage unavailable */ }
+}
+
+async function restoreSession() {
+  let state = null;
+  try { state = await sessionStore("readonly", st => st.get("last")); } catch (_) { return; }
+  if (!state?.file) return;
+  _restoring = true;
+  try {
+    await loadDataFile(state.file);
+    if (!datasetLoaded) return;
+    // Variables, target and options as they were
+    (state.dropped || []).forEach((col) => {
+      const cb = document.querySelector(`#vars-table .var-include[value="${CSS.escape(col)}"]`);
+      if (cb) { cb.checked = false; cb.closest("tr")?.classList.add("is-dropped"); }
+    });
+    if (state.target && datasetRows[0].includes(state.target)) $("target-column").value = state.target;
+    onTargetChange();
+    if (state.minutes) { $("training-time-limit").value = String(state.minutes); updateTimeDisplay(); }
+    if (state.metric && Array.from($("adv-eval-metric").options).some(o => o.value === state.metric)) $("adv-eval-metric").value = state.metric;
+    $("adv-use-cv").checked = state.cv !== false;
+    if (state.valPct) { $("adv-val-size").value = String(state.valPct); $("adv-val-size-display").textContent = `${state.valPct}%`; }
+    toggleValSplit();
+    updateTrainSummary();
+
+    lastUsedTargetColumn = state.usedTarget || null;
+    lastCleanedCsvBlob = state.cleanedCsv || null;
+    dataPreprocessing = state.preprocessing || {};
+    lastTrainConfig = state.trainConfig || null;
+    trainingId = state.trainingId || null;
+    unlockWizardStep(STEP.TRAIN);
+
+    if (state.result) {
+      shapPlot = state.shapPlot || null;
+      shapSummary = state.shapSummary || null;
+      unlockWizardStep(STEP.RESULTS);
+      renderTrainingResults(state.result, { silent: true });
+      $("use-last-model-btn").hidden = !state.result.download_url;
+      setWizardStep(STEP.RESULTS);
+      checkModelAvailable(state.result);
+    } else if (state.trainingId && state.trainingTimeLimit) {
+      // A training was running when the page was closed: follow it if the server still has it
+      const progress = await fetch(`/training_progress/${state.trainingId}`).then(r => (r.ok ? r.json() : null)).catch(() => null);
+      setWizardStep(STEP.TRAIN);
+      if (progress) {
+        trainingTimeLimit = state.trainingTimeLimit;
+        $("start-training-btn").hidden = true;
+        $("stop-training-btn").hidden = false;
+        startProgress(trainingTimeLimit);
+        pollTrainingResult(state.trainingId);
+      }
+    } else {
+      setWizardStep(Math.min(state.step || STEP.DATA, STEP.TRAIN));
+    }
+    showAlert(t("sessionRestored", { when: timeAgo(state.savedAt) }), "info", 6000);
+  } finally {
+    _restoring = false;
+  }
+}
+
+// Models are deleted from the server after a while: results stay visible, downloads and SHAP do not
+async function checkModelAvailable(result) {
+  if (!result?.download_url) return;
+  let ok = false;
+  try { ok = (await fetch(result.download_url, { method: "HEAD" })).ok; } catch (_) { ok = false; }
+  if (ok || lastResult !== result) return;
+  result.model_missing = true;
+  renderTrainingResults(result, { silent: true });
+  $("use-last-model-btn").hidden = true;
+}
+
+function timeAgo(ms) {
+  const minutes = Math.round((Date.now() - (ms || Date.now())) / 60000);
+  if (minutes < 1) return t("agoNow");
+  if (minutes < 60) return t("agoMinutes", { n: minutes });
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return t("agoHours", { n: hours });
+  return t("agoDays", { n: Math.round(hours / 24) });
 }
