@@ -321,6 +321,9 @@ const translations = {
     verdictBin_fair: "The model tells «{a}» from «{b}» acceptably, with room to improve",
     verdictBin_weak: "The model barely tells «{a}» from «{b}» better than chance",
     recommended: "recommended",
+    chooseTarget: "— Choose the variable to predict —",
+    targetSuggestions: "Suggestions:",
+    chooseTargetFirst: "Choose the variable to predict first",
   },
 
   es: {
@@ -644,6 +647,9 @@ const translations = {
     verdictBin_fair: "El modelo distingue entre «{a}» y «{b}» de forma aceptable, con margen de mejora",
     verdictBin_weak: "El modelo apenas distingue entre «{a}» y «{b}» mejor que el azar",
     recommended: "recomendada",
+    chooseTarget: "— Elige la variable a predecir —",
+    targetSuggestions: "Sugerencias:",
+    chooseTargetFirst: "Primero elige la variable a predecir",
   },
 
   fr: {
@@ -967,5 +973,8 @@ const translations = {
     verdictBin_fair: "Le modèle distingue «{a}» de «{b}» de façon acceptable, avec une marge de progrès",
     verdictBin_weak: "Le modèle distingue à peine «{a}» de «{b}» mieux que le hasard",
     recommended: "recommand\u00e9e",
+    chooseTarget: "— Choisissez la variable à prédire —",
+    targetSuggestions: "Suggestions :",
+    chooseTargetFirst: "Choisissez d'abord la variable à prédire",
   },
 };

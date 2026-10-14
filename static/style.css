@@ -844,3 +844,6 @@ body.expert p.expert-only { display: block; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+.target-suggest { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+select.is-empty { color: var(--text-muted); border-color: var(--primary); }

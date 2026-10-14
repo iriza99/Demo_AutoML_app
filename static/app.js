@@ -558,18 +558,25 @@ function invalidateResults() {
 }
 
 // ── Step 2 · Train ───────────────────────────────────────────────────────────
-function guessTarget(header) {
-  const hints = /(target|label|outcome|class|y|result|diagnos|event|death|mortal|readmi|sepsis)/i;
-  const named = [...header].reverse().find(h => hints.test(h));
-  return named || header[header.length - 1];
+// Likely outcome columns, offered as suggestions; the user always makes the choice
+function suggestTargets(header) {
+  const hints = /(target|label|outcome|class|result|diagnos|event|death|mortal|readmi|sepsis|status|survival|y$)/i;
+  const named = [...header].reverse().filter(h => hints.test(h));
+  return [...new Set([...named, header[header.length - 1]])].slice(0, 3);
 }
 
 function refreshTargetOptions(initial = false) {
   const select = $("target-column");
   const header = datasetRows[0];
   const current = select.value;
-  select.innerHTML = header.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
-  select.value = !initial && current && header.includes(current) ? current : guessTarget(header);
+  select.innerHTML = `<option value="">${esc(t("chooseTarget"))}</option>` +
+    header.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+  select.value = !initial && current && header.includes(current) ? current : "";
+  onTargetChange();
+}
+
+function chooseTarget(col) {
+  $("target-column").value = col;
   onTargetChange();
 }
 
@@ -597,7 +604,13 @@ function renderTargetInsight() {
   const box = $("target-insight");
   const target = $("target-column").value;
   const stat = (dataSetStats || []).find(s => s.name === target);
-  if (!stat) { box.innerHTML = ""; return; }
+  $("target-column").classList.toggle("is-empty", !target);
+  if (!stat) {
+    const suggestions = datasetRows ? suggestTargets(datasetRows[0]) : [];
+    box.innerHTML = suggestions.length ? `<div class="target-suggest"><span class="muted">${t("targetSuggestions")}</span>
+      ${suggestions.map(c => `<button type="button" class="chip-btn" onclick="chooseTarget(${jsArg(c)})">${esc(c)}</button>`).join("")}</div>` : "";
+    return;
+  }
   const task = taskTypeFor(target);
   const taskLabel = { classification: t("taskClassification"), regression: t("taskRegression"), timeseries: t("taskTimeseries") }[task];
   let detail = "";
@@ -719,18 +732,20 @@ function updateTrainSummary() {
   if (!list || !datasetLoaded) return;
   const target = $("target-column").value;
   const dropped = getDroppedColumns();
-  const used = datasetRows[0].length - 1 - dropped.filter(c => c !== target).length;
+  const used = datasetRows[0].length - (target ? 1 : 0) - dropped.filter(c => c !== target).length;
   const task = taskTypeFor(target);
-  const metric = $("adv-eval-metric").selectedOptions[0]?.textContent || "—";
+  const metric = target ? ($("adv-eval-metric").selectedOptions[0]?.textContent || "—") : "—";
   const items = [
     [t("data"), `${lastDatasetName}`],
     [t("target"), target || "—"],
-    [t("task"), { classification: t("taskClassification"), regression: t("taskRegression"), timeseries: t("taskTimeseries") }[task]],
+    [t("task"), target ? { classification: t("taskClassification"), regression: t("taskRegression"), timeseries: t("taskTimeseries") }[task] : "—"],
     [t("variablesUsed"), `${used}${dropped.length ? ` <span class="muted">(${dropped.length} ${t("excluded")})</span>` : ""}`],
     [t("metric"), metric],
     [t("time"), $("time-limit-display").textContent],
   ];
   list.innerHTML = items.map(([k, v]) => `<dt>${k}</dt><dd>${typeof v === "string" && v.includes("<span") ? v : esc(v)}</dd>`).join("");
+  $("start-training-btn").disabled = !target;
+  $("start-training-btn").title = target ? "" : t("chooseTargetFirst");
   updateStepSubtitles();
 }
 
