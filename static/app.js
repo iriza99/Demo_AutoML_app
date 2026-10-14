@@ -774,6 +774,7 @@ function startTraining() {
   const formData = new FormData();
   formData.append("file", blob, `${datasetBaseName()}.csv`);
   formData.append("target_column", target);
+  formData.append("lang", currentLang());
   formData.append("time_limit", String(Math.max(60, minutes * 60)));
   if (task === "timeseries") {
     formData.append("time_column", $("time-column").value);
@@ -1005,7 +1006,8 @@ function renderTrainingResults(data, { silent = false } = {}) {
     return `<div class="kpi card"><span class="kpi-label">${info.label}</span><span class="kpi-value">${value}</span>${note}<span class="kpi-help">${t(`help_${key}`) !== `help_${key}` ? t(`help_${key}`) : ""}</span></div>`;
   }).join("");
 
-  const plots = metricEntries(data).flatMap(([key, m]) => [m.plot, m.plot_hist].filter(Boolean).map((p, i) =>
+  // Native charts when the raw data is available; the PNGs remain for downloads, the PDF and old results
+  const plots = data.plot_data ? renderNativeCharts(data.plot_data) : metricEntries(data).flatMap(([key, m]) => [m.plot, m.plot_hist].filter(Boolean).map((p, i) =>
     `<figure class="plot card"><img src="data:image/png;base64,${p}" alt="${esc(key)}${i ? "_errors" : ""}" loading="lazy"><figcaption>${METRIC_INFO[key]?.label || key}</figcaption></figure>`));
   if (data.forecast_plot) plots.push(`<figure class="plot card"><img src="data:image/png;base64,${data.forecast_plot}" alt="forecast" loading="lazy"><figcaption>${t("forecast")}</figcaption></figure>`);
 
@@ -1053,6 +1055,196 @@ function renderTrainingResults(data, { silent = false } = {}) {
       <button class="btn btn-secondary" type="button" onclick="openChatWith(${jsArg(t("suggestGood"))})">${t("askButton")}</button>
     </div>`;
   updateStepSubtitles();
+}
+
+// ── Native charts (same tokens as the UI, light and dark) ───────────────────
+const SEQ_STEPS = 7;
+
+function chartTip(evt, html) {
+  let tip = document.getElementById("viz-tip");
+  if (!tip) {
+    tip = document.createElement("div");
+    tip.id = "viz-tip";
+    tip.className = "viz-tip";
+    document.body.appendChild(tip);
+  }
+  if (!html) { tip.hidden = true; return; }
+  tip.innerHTML = html;
+  tip.hidden = false;
+  const pad = 14;
+  const { innerWidth: w, innerHeight: h } = window;
+  const r = tip.getBoundingClientRect();
+  tip.style.left = `${Math.min(evt.clientX + pad, w - r.width - 8)}px`;
+  tip.style.top = `${Math.min(evt.clientY + pad, h - r.height - 8)}px`;
+}
+
+function renderNativeCharts(pd) {
+  const charts = [];
+  if (pd.confusion) charts.push(confusionMatrixChart(pd));
+  if (pd.roc) charts.push(rocChart(pd.roc));
+  if (pd.y_true) {
+    charts.push(scatterChart(pd));
+    charts.push(errorHistogramChart(pd.error_hist));
+  }
+  return charts;
+}
+
+function confusionMatrixChart(pd) {
+  const labels = pd.labels;
+  const m = pd.confusion;
+  const n = labels.length;
+  const rowTotals = m.map(r => r.reduce((a, b) => a + b, 0) || 1);
+  const head = `<div class="cm-corner"><span>${t("cmActual")} ↓ · ${t("cmPredicted")} →</span></div>` +
+    labels.map(l => `<div class="cm-colhead">${esc(l)}</div>`).join("");
+  const rows = labels.map((label, i) => `<div class="cm-rowhead">${esc(label)}</div>` + m[i].map((v, j) => {
+    const share = v / rowTotals[i];
+    const step = Math.min(SEQ_STEPS - 1, Math.round(share * (SEQ_STEPS - 1)));
+    const tip = esc(t("cmTip", { n: fmt(v, 0), actual: label, predicted: labels[j], pct: pct(share) }));
+    return `<div class="cm-cell seq-${step}${i === j ? " cm-diag" : ""}" data-tip="${tip}"><strong>${fmt(v, 0)}</strong><small>${pct(share, 0)}</small></div>`;
+  }).join("")).join("");
+  let stats = "";
+  if (n === 2) {
+    // Rates for the positive class (second label, as in the ROC curve)
+    const [[tn, fp], [fn, tp]] = m;
+    const rate = (a, b) => (a + b ? a / (a + b) : null);
+    const items = [["sensitivity", rate(tp, fn)], ["specificity", rate(tn, fp)], ["ppv", rate(tp, fp)], ["npv", rate(tn, fn)]];
+    stats = `<dl class="cm-stats">${items.map(([k, v]) => `<div><dt>${t(`stat_${k}`)}</dt><dd>${pct(v)}</dd></div>`).join("")}</dl>
+      <p class="muted cm-note">${t("cmPositive", { label: labels[1] })}</p>`;
+  }
+  return `<figure class="plot card chart">
+    <figcaption class="chart-title">${t("cmTitle")}</figcaption>
+    <p class="muted chart-sub">${t("cmSub")}</p>
+    <div class="cm" style="--n:${n}" onmousemove="const c=event.target.closest('.cm-cell'); chartTip(event, c ? c.dataset.tip : '')" onmouseleave="chartTip(event, '')">${head}${rows}</div>
+    ${stats}
+  </figure>`;
+}
+
+function axisTicks(min, max, count = 5) {
+  const step = (max - min) / (count - 1);
+  return Array.from({ length: count }, (_, i) => min + i * step);
+}
+
+// Round tick values (1, 2, 2.5, 5 × 10^k) that fall inside [min, max]
+function niceStep(span, count) {
+  const raw = span / Math.max(1, count);
+  const mag = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+  return [1, 2, 2.5, 5, 10].map(f => f * mag).find(s => s >= raw) || raw;
+}
+function niceTicks(min, max, count = 5) {
+  const step = niceStep(max - min, count);
+  const ticks = [];
+  for (let v = Math.ceil(min / step) * step; v <= max + step * 1e-9; v += step) ticks.push(+v.toPrecision(12));
+  return ticks;
+}
+function niceDomain(min, max, count = 5) {
+  const step = niceStep(max - min, count);
+  return [Math.floor(min / step) * step, Math.ceil(max / step) * step];
+}
+
+function svgFrame({ w, h, m, xTicks, yTicks, x, y, xLabel, yLabel, xFmt = v => fmt(v, 2), yFmt = v => fmt(v, 2) }) {
+  const grid = yTicks.map(v => `<line class="grid" x1="${m.l}" x2="${w - m.r}" y1="${y(v)}" y2="${y(v)}"/>
+      <text class="tick" x="${m.l - 8}" y="${y(v) + 4}" text-anchor="end">${yFmt(v)}</text>`).join("") +
+    xTicks.map(v => `<text class="tick" x="${x(v)}" y="${h - m.b + 18}" text-anchor="middle">${xFmt(v)}</text>`).join("");
+  return `${grid}
+    <line class="axis" x1="${m.l}" x2="${w - m.r}" y1="${h - m.b}" y2="${h - m.b}"/>
+    <text class="axis-label" x="${(m.l + w - m.r) / 2}" y="${h - 6}" text-anchor="middle">${esc(xLabel)}</text>
+    <text class="axis-label" transform="translate(14 ${(m.t + h - m.b) / 2}) rotate(-90)" text-anchor="middle">${esc(yLabel)}</text>`;
+}
+
+function rocChart(roc) {
+  const w = 420, h = 360, m = { l: 52, r: 16, t: 12, b: 48 };
+  const x = v => m.l + v * (w - m.l - m.r);
+  const y = v => h - m.b - v * (h - m.t - m.b);
+  const pts = roc.fpr.map((f, i) => [f, roc.tpr[i]]);
+  const line = pts.map(([f, tp], i) => `${i ? "L" : "M"}${x(f).toFixed(1)},${y(tp).toFixed(1)}`).join("");
+  const area = `${line}L${x(1)},${y(0)}L${x(0)},${y(0)}Z`;
+  const ticks = axisTicks(0, 1, 5);
+  const id = `roc-${uid()}`;
+  window[id] = roc;
+  return `<figure class="plot card chart">
+    <figcaption class="chart-title">${t("rocTitle")} · AUC ${fmt(roc.auc, 3)}</figcaption>
+    <p class="muted chart-sub">${t("rocSub", { label: roc.positive_label })}</p>
+    <svg class="viz" viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(t("rocTitle"))}"
+         onmousemove="rocHover(event, '${id}')" onmouseleave="rocHover(event, '${id}', true)">
+      ${svgFrame({ w, h, m, xTicks: ticks, yTicks: ticks, x, y, xLabel: t("rocX"), yLabel: t("rocY") })}
+      <line class="ref" x1="${x(0)}" y1="${y(0)}" x2="${x(1)}" y2="${y(1)}"/>
+      <text class="ref-label" x="${x(0.62)}" y="${y(0.56)}">${t("rocChance")}</text>
+      <path class="area" d="${area}"/>
+      <path class="series" d="${line}"/>
+      <g class="hover" hidden><line class="crosshair"/><circle r="5" class="dot"/></g>
+      <rect class="hit" x="${m.l}" y="${m.t}" width="${w - m.l - m.r}" height="${h - m.t - m.b}"/>
+    </svg>
+  </figure>`;
+}
+
+function rocHover(evt, id, leave = false) {
+  const svg = evt.currentTarget;
+  const g = svg.querySelector(".hover");
+  if (leave) { g.hidden = true; chartTip(evt, ""); return; }
+  const roc = window[id];
+  const w = 420, h = 360, m = { l: 52, r: 16, t: 12, b: 48 };
+  const box = svg.getBoundingClientRect();
+  const fx = Math.max(0, Math.min(1, ((evt.clientX - box.left) * (w / box.width) - m.l) / (w - m.l - m.r)));
+  let best = 0;
+  roc.fpr.forEach((f, i) => { if (Math.abs(f - fx) < Math.abs(roc.fpr[best] - fx)) best = i; });
+  const px = m.l + roc.fpr[best] * (w - m.l - m.r), py = h - m.b - roc.tpr[best] * (h - m.t - m.b);
+  g.hidden = false;
+  const cross = g.querySelector(".crosshair");
+  cross.setAttribute("x1", px); cross.setAttribute("x2", px); cross.setAttribute("y1", m.t); cross.setAttribute("y2", h - m.b);
+  const dot = g.querySelector(".dot");
+  dot.setAttribute("cx", px); dot.setAttribute("cy", py);
+  const thr = roc.threshold[best];
+  chartTip(evt, `<strong>${t("stat_sensitivity")} ${pct(roc.tpr[best])}</strong><br>${t("stat_specificity")} ${pct(1 - roc.fpr[best])}` +
+    (thr != null && thr <= 1 ? `<br><span class="muted">${t("rocThreshold")} ${fmt(thr, 2)}</span>` : ""));
+}
+
+function niceRange(values) {
+  let min = Math.min(...values), max = Math.max(...values);
+  if (min === max) { min -= 1; max += 1; }
+  const pad = (max - min) * 0.05;
+  return [min - pad, max + pad];
+}
+
+function scatterChart(pd) {
+  const w = 420, h = 360, m = { l: 60, r: 16, t: 12, b: 48 };
+  const [lo, hi] = niceDomain(...niceRange(pd.y_true.concat(pd.y_pred)));
+  const x = v => m.l + (v - lo) / (hi - lo) * (w - m.l - m.r);
+  const y = v => h - m.b - (v - lo) / (hi - lo) * (h - m.t - m.b);
+  const ticks = niceTicks(lo, hi, 5);
+  const dots = pd.y_true.map((a, i) => `<circle class="pt" r="4" cx="${x(a).toFixed(1)}" cy="${y(pd.y_pred[i]).toFixed(1)}"><title>${t("cmActual")} ${fmt(a)} · ${t("cmPredicted")} ${fmt(pd.y_pred[i])}</title></circle>`).join("");
+  return `<figure class="plot card chart">
+    <figcaption class="chart-title">${t("scatterTitle")}</figcaption>
+    <p class="muted chart-sub">${t("scatterSub", { n: fmt(pd.y_true.length, 0), total: fmt(pd.n, 0) })}</p>
+    <svg class="viz" viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(t("scatterTitle"))}">
+      ${svgFrame({ w, h, m, xTicks: ticks, yTicks: ticks, x, y, xLabel: t("cmActual"), yLabel: t("cmPredicted"), xFmt: v => fmt(v, 3), yFmt: v => fmt(v, 3) })}
+      <line class="ref" x1="${x(lo)}" y1="${y(lo)}" x2="${x(hi)}" y2="${y(hi)}"/>
+      <g class="pts">${dots}</g>
+    </svg>
+  </figure>`;
+}
+
+function errorHistogramChart(hist) {
+  const w = 420, h = 300, m = { l: 52, r: 16, t: 12, b: 48 };
+  const edges = hist.edges, counts = hist.counts;
+  const lo = edges[0], hi = edges[edges.length - 1];
+  const maxC = niceDomain(0, Math.max(...counts) || 1, 4)[1];
+  const x = v => m.l + (v - lo) / (hi - lo || 1) * (w - m.l - m.r);
+  const y = v => h - m.b - v / maxC * (h - m.t - m.b);
+  const bars = counts.map((c, i) => {
+    const x0 = x(edges[i]) + 1, x1 = x(edges[i + 1]) - 1, top = y(c), base = h - m.b;
+    if (c === 0 || x1 <= x0) return "";
+    const r = Math.min(4, (x1 - x0) / 2, base - top);
+    return `<path class="bar" d="M${x0},${base}V${top + r}Q${x0},${top} ${x0 + r},${top}H${x1 - r}Q${x1},${top} ${x1},${top + r}V${base}Z"><title>${fmt(edges[i], 3)} – ${fmt(edges[i + 1], 3)}: ${fmt(c, 0)}</title></path>`;
+  }).join("");
+  const zero = lo < 0 && hi > 0 ? `<line class="ref" x1="${x(0)}" x2="${x(0)}" y1="${m.t}" y2="${h - m.b}"/>` : "";
+  return `<figure class="plot card chart">
+    <figcaption class="chart-title">${t("errorsTitle")}</figcaption>
+    <p class="muted chart-sub">${t("errorsSub")}</p>
+    <svg class="viz" viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(t("errorsTitle"))}">
+      ${svgFrame({ w, h, m, xTicks: niceTicks(lo, hi, 5), yTicks: niceTicks(0, maxC, 4), x, y, xLabel: t("errorsX"), yLabel: t("errorsY"), xFmt: v => fmt(v, 3), yFmt: v => fmt(v, 0) })}
+      ${bars}${zero}
+    </svg>
+  </figure>`;
 }
 
 function setResultsTab(id) {
@@ -1146,13 +1338,25 @@ async function downloadPDF() {
   }
   showAlert(t("pdfGenerating"), "info", 4000);
   try {
+    const r = lastResult;
     const payload = {
-      summary: summaryResults, preview: dataSetPreview, stats: dataSetStats,
-      data_preprocessing: dataPreprocessing, target_column: lastUsedTargetColumn, dataset_name: lastDatasetName,
+      lang: currentLang(),
+      dataset_name: lastDatasetName,
+      target_column: lastUsedTargetColumn,
+      n_rows: datasetRows ? datasetRows.length - 1 : null,
+      n_columns: datasetRows ? datasetRows[0].length : null,
+      excluded: ((dataPreprocessing.data_preprocessing || {}).columns_drop || []).filter(c => c !== lastUsedTargetColumn),
+      imputation: (dataPreprocessing.data_preprocessing || {}).imputation_missing_value || {},
+      task_type: r.task_type, best_model: r.best_model, train_time: r.train_time, used_gpu: !!r.used_gpu,
+      metrics: Object.fromEntries(metricEntries(r).map(([k, m]) => [k, m.value])),
+      plot_data: r.plot_data || null,
+      feature_importance: r.feature_importance || null,
+      feature_importance_plot: r.feature_importance ? null : (r.feature_importance_plot || null),
+      forecast_plot: r.forecast_plot || null,
+      leaderboard: (r.leaderboard || []).map(row => ({ model: row.model, score_val: row.score_val, fit_time: row.fit_time })),
+      stats: dataSetStats.map(({ hist, ...rest }) => rest),
     };
-    const groqKey = getGroqKey();
-    if (groqKey) payload.groq_api_key = groqKey;
-    if (shapPlot) payload.shap_summary_plot = shapPlot;
+    if (shapPlot) payload.shap_plot = shapPlot;
     const response = await fetch("/download_pdf", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
     });
@@ -1249,6 +1453,7 @@ async function runPrediction() {
     const formData = new FormData();
     formData.append("dataset", dataset);
     formData.append("zip_model", model);
+    formData.append("lang", currentLang());
     const data = await (await fetch("/predict", { method: "POST", body: formData })).json();
     if (data.error) { showAlert(t(data.error), "error"); return; }
     if (!data.preview?.length) { showAlert(t("noPrediction"), "warning"); return; }
@@ -1402,6 +1607,7 @@ async function sendChat(preset) {
         };
         if (shapPlot) payload.shap_summary_plot = shapPlot;
         if (lastResult.feature_importance) payload.feature_importance = lastResult.feature_importance;
+        if (lastResult.plot_data) payload.plot_data = lastResult.plot_data;
         payload.model_metadata = {
           task_type: summaryResults.task_type, best_model: summaryResults.best_model,
           target_column: lastUsedTargetColumn || null, prediction_length: summaryResults.prediction_length || null,

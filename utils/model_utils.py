@@ -18,6 +18,7 @@ import shap
 from datetime import datetime
 
 from utils.training_progress import ProgressCallback, gpu_available, gpu_hyperparameters
+from utils import plots
 
 from sklearn.metrics import (
     accuracy_score, f1_score, roc_auc_score,
@@ -80,39 +81,14 @@ def save_plot_to_disk(plt_obj, save_path, filename):
 
 # Convert a SHAP plot to a base64-encoded PNG image
 def shap_plot_to_base64(plot_func, *args, **kwargs):
-    plt.figure()
+    fig = plt.figure()
     plot_func(*args, **kwargs, show=False)
-
-    buffer = io.BytesIO()
-    plt.savefig(buffer, format='png', bbox_inches='tight')
-    buffer.seek(0)
-    image_base64 = base64.b64encode(buffer.read()).decode("utf-8")
-    plt.close()
-    return image_base64
+    return plots.to_base64(plt.gcf())
 
 # Generate a histogram of prediction errors (RMSE) and return as base64 image
 def generate_rmse_error_histogram_base64(y_true, y_pred, save_dir=None):
-    errors = y_pred - y_true  
-    plt.figure(figsize=(8, 6))
-    sns.histplot(errors, bins=30, kde=True, color='orange', stat='density')
-    plt.axvline(0, color='blue', linestyle='--', label='Zero error')
-    plt.title('Distribution of Prediction Errors')
-    plt.xlabel('Error (Predicted - Actual)')
-    plt.ylabel('Density')
-    plt.legend()
-    plt.tight_layout()
-
-    if save_dir:
-        save_plot_to_disk(plt, save_dir, "rmse_error_distribution.png")
-
-    # Encode as base64 image
-    buffer = io.BytesIO()
-    plt.savefig(buffer, format='png')
-    buffer.seek(0)
-    image_base64 = base64.b64encode(buffer.read()).decode('utf-8')
-    plt.close()
-
-    return image_base64
+    path = os.path.join(save_dir, "rmse_error_distribution.png") if save_dir else None
+    return plots.error_histogram_figure(y_true, y_pred, save_path=path)
 
 def _metric_or_fallback(value, name, score_metric, primary_value, oof_ok, y_true, y_pred):
     """Resolve a scalar metric when the leaderboard has no column for it.
@@ -134,92 +110,29 @@ def _metric_or_fallback(value, name, score_metric, primary_value, oof_ok, y_true
 
 # Generate a feature importance bar plot and return as base64 image
 def generate_feature_importance_plot(importances, save_dir=None):
-    # Keep only features with non-trivial importance; fall back to top-20 if all near zero
-    significant = importances[importances['importance'].abs() > 1e-6]
-    importances = (significant if not significant.empty else importances).head(20)
-    n = len(importances)
-    fig_height = max(4, n * 0.35)
-    plt.figure(figsize=(10, fig_height))
-
-    all_near_zero = importances['importance'].abs().max() < 1e-4
-    if all_near_zero:
-        plt.text(0.5, 0.5, 'Feature importance not available\n(all values ≈ 0)',
-                 ha='center', va='center', transform=plt.gca().transAxes, fontsize=13, color='gray')
-        plt.axis('off')
-    else:
-        sns.barplot(x=importances['importance'], y=importances.index, palette='viridis')
-        plt.xlabel('Importance')
-        plt.ylabel('Features')
-    plt.title('Feature Importance')
-    plt.tight_layout()
-
-    if save_dir:
-        save_plot_to_disk(plt, save_dir, "feature_importance.png")
-
-    buffer = io.BytesIO()
-    plt.savefig(buffer, format='png')
-    buffer.seek(0)
-    image_base64 = base64.b64encode(buffer.read()).decode('utf-8')
-    plt.close()
-
-    return image_base64
+    path = os.path.join(save_dir, "feature_importance.png") if save_dir else None
+    values = importances['importance']
+    return plots.importance_figure(list(map(str, values.index)), values.to_numpy(dtype=float), save_path=path)
 
 # Generate metric-specific plots (confusion matrix, ROC, F1, RMSE) and return as base64 image
 def generate_metric_plot(metric_name, y_true=None, y_pred=None, y_proba=None, class_labels=None, save_dir=None):
-    fig, ax = plt.subplots()
     metric_name = metric_name.lower()
-    filename = f"{metric_name}.png"
-
+    path = os.path.join(save_dir, f"{metric_name}.png") if save_dir else None
     if metric_name == 'accuracy':
-        # Display confusion matrix
         cm = confusion_matrix(y_true, y_pred, labels=class_labels)
-        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=class_labels)
-        disp.plot(ax=ax, cmap='Blues', colorbar=False)
-        ax.set_title("Confusion Matrix")
-
-    elif metric_name == 'roc_auc' and y_proba is not None:
+        return plots.confusion_matrix_figure(cm, class_labels, save_path=path)
+    if metric_name == 'roc_auc' and y_proba is not None:
         pos_label = class_labels[1] if class_labels else 1
         fpr, tpr, _ = roc_curve(y_true, y_proba, pos_label=pos_label)
-        ax.plot(fpr, tpr, label='ROC Curve')
-        ax.plot([0, 1], [0, 1], 'k--', label='Random')
-        ax.set_xlabel('False Positive Rate')
-        ax.set_ylabel('True Positive Rate')
-        ax.set_title('ROC Curve')
-        ax.legend()
-
-    elif metric_name == 'f1_macro':
-        # F1 score bar plot per class
-        f1_per_class = f1_score(y_true, y_pred, average=None, labels=class_labels)
-        ax.bar(class_labels, f1_per_class, color='lightgreen')
-        ax.set_title("F1 Score per Class")
-        ax.set_ylabel("F1 Score")
-
-    elif metric_name == 'rmse':
-        # Scatter plot for regression predictions vs actual values
-        ax.scatter(y_true, y_pred, alpha=0.5, color='coral', label='Predictions')
-        min_val = min(min(y_true), min(y_pred))
-        max_val = max(max(y_true), max(y_pred))
+        y_bin = (np.asarray(y_true) == pos_label).astype(int)
+        return plots.roc_figure(fpr, tpr, float(roc_auc_score(y_bin, y_proba)), save_path=path)
+    if metric_name == 'f1_macro':
+        scores = f1_score(y_true, y_pred, average=None, labels=class_labels)
+        return plots.f1_by_class_figure(class_labels, scores, save_path=path)
+    if metric_name == 'rmse':
         rmse_value = mean_squared_error(y_true, y_pred) ** 0.5
-        ax.plot([min_val, max_val], [min_val, max_val], 'k--', label='y = x')
-        ax.set_xlabel("Actual Values")
-        ax.set_ylabel("Predicted Values")
-        ax.set_title(f"Predictions vs Actual (RMSE = {rmse_value:.4f})")
-        ax.legend()
-
-    else:
-        ax.text(0.5, 0.5, f"No plot available for {metric_name}", ha='center', va='center')
-        ax.set_axis_off()
-
-    plt.tight_layout()
-    if save_dir:
-        save_plot_to_disk(plt, save_dir, filename)
-    
-    buffer = io.BytesIO()
-    plt.savefig(buffer, format='png')
-    buffer.seek(0)
-    image_base64 = base64.b64encode(buffer.read()).decode('utf-8')
-    plt.close()
-    return image_base64
+        return plots.scatter_figure(y_true, y_pred, rmse=rmse_value, save_path=path)
+    return None
 
 # Log exactly which Python and AutoGluon are being used by the Flask server
 import sys
@@ -234,13 +147,14 @@ except Exception as _e:
 # Train an AutoGluon model and return training results and plots
 def train_model(df, target_column, time_limit, save_path, stop_event=None, time_column=None,
                 prediction_length_percent=None, eval_metric=None, excluded_model_types=None,
-                num_bag_folds=None, val_size=None, progress=None):
+                num_bag_folds=None, val_size=None, progress=None, lang='en'):
     try:
         save_path = os.path.abspath(save_path)
 
         plot_dir = os.path.join(save_path, "plot_train_results")
         os.makedirs(plot_dir, exist_ok=True)
 
+        plots.use_language(lang)
         if df[target_column].isnull().any():
             raise UserError("error_missing_target_values")
 
@@ -573,8 +487,22 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
             summary += f"Résultat de la métrique R2 : {r2:.4f}\n" if r2 is not None else ""
             summary += f"Résultat de la métrique RMSE : {rmse:.4f}" if rmse is not None else ""
 
+        # Raw data behind the figures: drawn natively by the app and read by the assistant
+        plot_data = None
+        if oof_ok:
+            try:
+                if task_type in ('binary', 'multiclass'):
+                    pos = class_labels[1] if task_type == 'binary' else None
+                    proba_pos = y_proba[pos] if (pos is not None and y_proba is not None) else None
+                    plot_data = plots.classification_plot_data(y_test_eval, y_pred, class_labels, proba_pos, pos)
+                elif task_type == 'regression':
+                    plot_data = plots.regression_plot_data(y_test_eval, y_pred)
+            except Exception:
+                logging.exception("Could not build plot data")
+
         results = {
             'best_model': best_model,
+            'plot_data': plot_data,
             'train_time': float(leaderboard['fit_time'].sum()),
             'task_type': task_type,
             'metrics': perf_data,
@@ -886,70 +814,24 @@ def generate_shap_plot(model_path, df, target_column):
 
 # Plot distribution of predicted values for regression
 def plot_regression_distribution(y_pred):
-    plt.figure(figsize=(8, 6))
-    sns.histplot(y_pred, bins=30, kde=True, color='skyblue')
-    plt.title("Distribution of Predicted Values")
-    plt.xlabel("Predicted Values")
-    plt.ylabel("Frequency")
-    plt.tight_layout()
-
-    buffer = io.BytesIO()
-    plt.savefig(buffer, format="png")
-    buffer.seek(0)
-    image_base64 = base64.b64encode(buffer.read()).decode("utf-8")
-    plt.close()
-    return image_base64
+    return plots.prediction_histogram_figure(y_pred)
 
 # Plot boxplot to detect outliers in predictions
 def plot_prediction_outliers(y_pred):
-    plt.figure(figsize=(8, 6))
-    sns.boxplot(x=y_pred, color="tomato")
-    plt.title("Outlier Detection in Predictions")
-    plt.xlabel("Predicted Value")
-    plt.tight_layout()
-
-    buffer = io.BytesIO()
-    plt.savefig(buffer, format="png")
-    buffer.seek(0)
-    image_base64 = base64.b64encode(buffer.read()).decode("utf-8")
-    plt.close()
-    return image_base64
+    return plots.prediction_box_figure(y_pred)
 
 # Plot distribution of predicted classes for classification
 def plot_predicted_class_distribution(y_pred):
-    plt.figure(figsize=(8, 6))
-    sns.countplot(x=y_pred, palette='pastel')
-    plt.title("Predicted Class Distribution")
-    plt.xlabel("Predicted Class")
-    plt.ylabel("Number of Occurrences")
-    plt.tight_layout()
-
-    buffer = io.BytesIO()
-    plt.savefig(buffer, format="png")
-    buffer.seek(0)
-    image_base64 = base64.b64encode(buffer.read()).decode("utf-8")
-    plt.close()
-    return image_base64
+    return plots.class_count_figure(y_pred)
 
 # Plot predicted probability distributions for each class
 def plot_prediction_confidence(y_proba_df):
-    plt.figure(figsize=(10, 6))
-    sns.boxplot(data=y_proba_df, orient='h', palette='Set2')
-    plt.title("Predicted Probability Distribution by Class")
-    plt.xlabel("Predicted Probability")
-    plt.ylabel("Class")
-    plt.tight_layout()
-
-    buffer = io.BytesIO()
-    plt.savefig(buffer, format="png")
-    buffer.seek(0)
-    image_base64 = base64.b64encode(buffer.read()).decode("utf-8")
-    plt.close()
-    return image_base64
+    return plots.class_probability_figure(y_proba_df)
 
 # Predict using a trained model and generate relevant plots
-def predict_model(csv_path, model_path):
+def predict_model(csv_path, model_path, lang='en'):
     try:
+        plots.use_language(lang)
         predictor = TabularPredictor.load(model_path)
 
         df = load_dataframe(csv_path)

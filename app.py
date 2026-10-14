@@ -1,6 +1,7 @@
 ﻿from flask import Flask, request, render_template, jsonify, send_file
 from utils.model_utils import load_dataframe, train_model, predict_model, generate_shap_plot, UserError
-from utils.chatbot_utils import handle_chat_request, build_preprocessing_summary, generate_pdf, server_groq_key
+from utils.chatbot_utils import handle_chat_request, server_groq_key
+from utils.report import build_report
 from datetime import datetime
 import shutil
 import zipfile
@@ -155,6 +156,7 @@ def train():
         excluded_str = request.form.get('excluded_model_types', '')
         excluded_model_types = [m.strip() for m in excluded_str.split(',') if m.strip()] or None
         use_cv = request.form.get('use_cv', '1') == '1'
+        lang = request.form.get('lang', 'en')
         num_bag_folds = 8 if use_cv else 0
         val_size = None
         if not use_cv:
@@ -192,7 +194,8 @@ def train():
                 metrics = train_model(df, target_column, time_limit, training_folder, stop_event,
                                      time_column=time_column, prediction_length_percent=prediction_length_percent,
                                      eval_metric=eval_metric, excluded_model_types=excluded_model_types,
-                                     num_bag_folds=num_bag_folds, val_size=val_size, progress=progress)
+                                     num_bag_folds=num_bag_folds, val_size=val_size, progress=progress,
+                                     lang=lang)
                 zip_path = os.path.join(MODEL_FOLDER, zip_filename)
                 shutil.make_archive(base_name=zip_path.replace('.zip', ''), format='zip', root_dir=training_folder)
                 logger.info(f"Model compressed and saved: {zip_filename}")
@@ -281,43 +284,14 @@ def download_model(zip_filename):
 @app.route('/download_pdf', methods=['POST'])
 def download_pdf():
     try:
-        data = request.get_json()
-
-        # Récupération des différentes parties
-        summary_results = data.get('summary', {})
-        dataset_preview = data.get('preview', [])
-        dataset_stats = data.get('stats', [])
-        preprocessing = data.get('data_preprocessing', {})
-        target_column = data.get('target_column', '')
-        dataset_name = data.get('dataset_name', '')
-        shap_plot = data.get('shap_summary_plot', None)
-        
-        # Construction du résumé des étapes de prétraitement
-        preprocessing_summary = build_preprocessing_summary(preprocessing, groq_api_key=data.get('groq_api_key'))
-
-        # Génération du PDF
-        buffer = generate_pdf(
-            summary_results,
-            dataset_preview,
-            dataset_stats,
-            preprocessing_summary,
-            target_column,
-            dataset_name,
-            shap_plot,
-            groq_api_key=data.get('groq_api_key')
-        )
-
-        return send_file(
-            buffer,
-            as_attachment=True,
-            download_name='training_summary.pdf',
-            mimetype='application/pdf'
-        )
-    except Exception as e:
+        data = request.get_json(silent=True) or {}
+        buffer = build_report(data, lang=data.get('lang', 'en'))
+        return send_file(buffer, as_attachment=True, download_name='training_report.pdf',
+                         mimetype='application/pdf')
+    except Exception:
         logger.error(f"Error generating PDF: {traceback.format_exc()}")
         return jsonify({'error': 'PDF generation failed.'}), 500
 
-    
 
 @app.route('/generate_shap_plot', methods=['POST'])
 def shap_plot():
@@ -408,7 +382,7 @@ def predict():
             raise UserError("error_invalid_zip")
 
         # Run prediction
-        result = predict_model(file_path, decompression_folder)
+        result = predict_model(file_path, decompression_folder, lang=request.form.get('lang', 'en'))
         predictions = result['predictions']
         plots = result['plots']
 
