@@ -238,27 +238,17 @@
             <button id="stop-training-btn" class="btn btn-danger btn-block" type="button" onclick="stopTraining()" hidden data-i18n="stopTraining">Stop training</button>
             <div id="training-spinner" class="spinner" hidden></div>
             <div id="training-panel" class="training-panel" role="status" aria-live="polite">
-              <div class="tp-header">
-                <div class="tp-status"><span class="tp-pulse-dot"></span><span class="tp-title" data-i18n="trainingOverlayTitle">Training models…</span></div>
+              <div class="tp-status">
+                <span class="tp-pulse-dot"></span>
+                <span id="tp-phase" class="tp-title"></span>
+                <span id="tp-gpu" class="pill pill-ok" hidden>GPU</span>
               </div>
-              <div class="tp-dataset-info">
-                <span id="tp-dataset-name" class="pill"></span>
-                <span id="tp-target-col" class="pill pill-primary"></span>
+              <div class="tp-time-row">
+                <span id="tp-elapsed" class="tp-time">0:00</span>
+                <span id="tp-limit" class="muted"></span>
               </div>
-              <div class="tp-timer-wrap">
-                <svg class="tp-ring" viewBox="0 0 100 100" aria-hidden="true">
-                  <circle class="tp-ring-track" cx="50" cy="50" r="38"/>
-                  <circle id="tp-ring-fill" class="tp-ring-fill" cx="50" cy="50" r="38"/>
-                </svg>
-                <div class="tp-timer-center">
-                  <span id="training-countdown" class="tp-time">--:--</span>
-                  <span class="tp-time-label" data-i18n="remaining">remaining</span>
-                </div>
-              </div>
-              <div class="tp-progress-wrap">
-                <div class="tp-progress-bar"><div id="tp-progress-fill" class="tp-progress-fill"></div></div>
-                <span id="tp-progress-pct" class="tp-progress-pct">0%</span>
-              </div>
+              <div class="tp-progress-bar"><div id="tp-progress-fill" class="tp-progress-fill"></div></div>
+              <p id="tp-note" class="muted tp-note"></p>
               <div id="tp-models-list" class="tp-models-list"></div>
             </div>
           </aside>

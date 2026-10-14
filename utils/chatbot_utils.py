@@ -18,6 +18,54 @@ def server_groq_key():
     """Groq key from the environment (.env is loaded by app.py after this import)."""
     return os.getenv('GROQ_API_KEY')
 
+
+# Groq retired meta-llama/llama-4-scout-17b-16e-instruct on 2026-07-17; the model
+# is configurable so the next retirement only needs a .env change.
+DEFAULT_GROQ_MODEL = 'openai/gpt-oss-120b'
+
+
+def groq_model():
+    return os.getenv('GROQ_MODEL', DEFAULT_GROQ_MODEL)
+
+
+def groq_supports_images():
+    """Only send plot images when GROQ_VISION=1 names a vision-capable model."""
+    return os.getenv('GROQ_VISION', '0').strip().lower() in ('1', 'true', 'yes')
+
+
+def _text_only(messages):
+    """Drop image parts for text-only models, keeping any accompanying text."""
+    out = []
+    for m in messages:
+        content = m.get('content')
+        if isinstance(content, list):
+            continue  # image messages only carry a caption about the image itself
+        out.append(m)
+    return out
+
+
+def groq_complete(api_key, messages, max_tokens=1024, temperature=0.7):
+    """Single entry point for Groq chat completions."""
+    model = groq_model()
+    if not groq_supports_images():
+        messages = _text_only(messages)
+    kwargs = {}
+    if model.startswith('openai/gpt-oss'):
+        # Reasoning tokens count towards the completion budget; keep them short
+        kwargs['reasoning_effort'] = 'low'
+        max_tokens = max_tokens * 2
+    client = Groq(api_key=api_key)
+    completion = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_completion_tokens=max_tokens,
+        top_p=1,
+        stream=False,
+        **kwargs,
+    )
+    return completion.choices[0].message.content or ''
+
 def clean_markdown(text):
     # Remove markdown bold and italic markers from text
     return re.sub(r'(\*\*|\*)', '', text)
@@ -87,6 +135,12 @@ def handle_chat_request(data, extra_system=''):
         if meta_lines:
             append_if_exists(messages, "Métadonnées du modèle:", "\n".join(meta_lines))
 
+    importance = data.get('feature_importance') or {}
+    if importance:
+        lines = [f"{name}: {value:.4f}" for name, value in
+                 sorted(importance.items(), key=lambda kv: kv[1], reverse=True)[:15]]
+        append_if_exists(messages, "Variable importance (permutation, higher = more important):", "\n".join(lines))
+
     # Add metric plots from summary if present
     if summary:
         add_metric_plots_from_summary(messages, summary)
@@ -108,18 +162,7 @@ def handle_chat_request(data, extra_system=''):
     # Add the user's message at the end
     messages.append({"role": "user", "content": user_input})
 
-    # Send the conversation to the Groq API and get the response
-    client = Groq(api_key=groq_key)
-    completion = client.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",
-        messages=messages,
-        temperature=0.7,
-        max_completion_tokens=1024,
-        top_p=1,
-        stream=False
-    )
-
-    return completion.choices[0].message.content
+    return groq_complete(groq_key, messages, max_tokens=1024, temperature=0.7)
 
 def append_if_exists(messages, title, content):
     # Append a message to the conversation if content is not empty
@@ -164,12 +207,6 @@ def build_preprocessing_summary(preprocessing_summary: dict, lang='en', groq_api
     if not key:
         return f"Preprocessing steps: {preprocessing_summary}"
 
-    try:
-        client = Groq(api_key=key)
-    except Exception:
-        logging.exception("No valid Groq API key for preprocessing summary")
-        return f"Preprocessing steps: {preprocessing_summary}"
-
     system_prompt = get_system_prompt_preprocessing()
 
     messages = [
@@ -178,15 +215,7 @@ def build_preprocessing_summary(preprocessing_summary: dict, lang='en', groq_api
     ]
 
     try:
-        response = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=messages,
-            temperature=0.5,
-            max_completion_tokens=512,
-            top_p=1,
-            stream=False
-        )
-        return response.choices[0].message.content
+        return groq_complete(key, messages, max_tokens=512, temperature=0.5)
     except Exception:
         logging.exception("Groq call failed for preprocessing summary")
         return f"Preprocessing steps: {preprocessing_summary}"
@@ -199,6 +228,9 @@ def generate_explanation_plot(plot = None, name = None, value = None, groq_api_k
     if not key:
         return f"Plot {name} (value={value})"
     messages = [{"role": "system", "content": get_system_prompt_explanation_plot()}]
+    if plot and not groq_supports_images():
+        # Text-only model: explain from the name and value instead of the image
+        plot = None
     if plot and value:
         add_image_message(messages, f"Here the graph {name} to explain and the value of the metric {value}", plot)
     elif plot:
@@ -207,17 +239,7 @@ def generate_explanation_plot(plot = None, name = None, value = None, groq_api_k
         messages.append({"role": "user", "content": f"Please explain the metric {name} with the value {value}."})
     
     try:
-        client = Groq(api_key=key)
-        response = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=messages,
-            temperature=0.5,
-            max_completion_tokens=512,
-            top_p=1,
-            stream=False
-        )
-        raw_text = response.choices[0].message.content
-        return clean_markdown(raw_text)
+        return clean_markdown(groq_complete(key, messages, max_tokens=512, temperature=0.5))
     except Exception:
         logging.exception("Groq call failed for explanation plot")
         return f"Plot {name} (value={value})"

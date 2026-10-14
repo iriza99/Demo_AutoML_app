@@ -14,6 +14,7 @@ import atexit
 from cleanup import cleanup_old_files
 from study_routes import study_bp
 from utils.study import store as study_store
+from utils.training_progress import TrainingProgress
 from apscheduler.schedulers.background import BackgroundScheduler
 import os
 
@@ -27,6 +28,9 @@ stop_events = {}
 
 # Dictionary to store training results
 training_results = {}
+
+# Live training progress reported by AutoGluon callbacks: training_id → TrainingProgress
+training_progress = {}
 
 # Server-side cache of model paths: training_id → absolute model_path
 # Used by the SHAP route so clients never need to transmit filesystem paths.
@@ -179,6 +183,8 @@ def train():
 
         stop_event = threading.Event()
         stop_events[training_id] = stop_event
+        progress = TrainingProgress(time_limit=time_limit)
+        training_progress[training_id] = progress
 
         # Training task to run in a separate thread
         def training_task():
@@ -186,7 +192,7 @@ def train():
                 metrics = train_model(df, target_column, time_limit, training_folder, stop_event,
                                      time_column=time_column, prediction_length_percent=prediction_length_percent,
                                      eval_metric=eval_metric, excluded_model_types=excluded_model_types,
-                                     num_bag_folds=num_bag_folds, val_size=val_size)
+                                     num_bag_folds=num_bag_folds, val_size=val_size, progress=progress)
                 zip_path = os.path.join(MODEL_FOLDER, zip_filename)
                 shutil.make_archive(base_name=zip_path.replace('.zip', ''), format='zip', root_dir=training_folder)
                 logger.info(f"Model compressed and saved: {zip_filename}")
@@ -198,6 +204,7 @@ def train():
                 if metrics.get('model_path'):
                     _trained_model_paths[training_id] = metrics['model_path']
 
+                progress.set_phase('done')
                 training_results[training_id] = metrics
                 logger.info(f"Training successfully completed for {training_id}.")
 
@@ -233,18 +240,29 @@ def train():
 def get_training_result(training_id):
     # Return training result if available, else 202 Accepted
     if training_id in training_results:
-        result = training_results.pop(training_id)  
+        result = training_results.pop(training_id)
+        training_progress.pop(training_id, None)
         return jsonify(result)
     else:
         return '', 202  
 
     
+@app.route('/training_progress/<training_id>', methods=['GET'])
+def get_training_progress(training_id):
+    progress = training_progress.get(training_id)
+    if progress is None:
+        return jsonify({"error": "training_id_not_found"}), 404
+    return jsonify(progress.to_dict())
+
+
 @app.route('/stop_training/<training_id>', methods=['POST'])
 def stop_training(training_id):
     # Allow user to stop a running training session
     stop_event = stop_events.get(training_id)
     if stop_event:
         stop_event.set()
+        if training_id in training_progress:
+            training_progress[training_id].stopping = True
         return jsonify({"message": "training_stopped"})
     else:
         return jsonify({"error": "training_id_not_found"}), 404
@@ -441,7 +459,9 @@ def chat():
         return jsonify({"error": str(ve)}), 400
     except Exception as e:
         logger.error(f"Error in chat endpoint: {traceback.format_exc()}")
-        return jsonify({"error": "error_chat"}), 500
+        # Pass the provider's reason (e.g. retired model, invalid key) on to the user
+        detail = getattr(e, 'message', None) or str(e)
+        return jsonify({"error": "error_chat", "detail": detail[:300]}), 500
     
 
 

@@ -17,6 +17,8 @@ import numpy as np
 import shap
 from datetime import datetime
 
+from utils.training_progress import ProgressCallback, gpu_available, gpu_hyperparameters
+
 from sklearn.metrics import (
     accuracy_score, f1_score, roc_auc_score,
     mean_squared_error, r2_score, roc_curve, confusion_matrix, ConfusionMatrixDisplay
@@ -232,7 +234,7 @@ except Exception as _e:
 # Train an AutoGluon model and return training results and plots
 def train_model(df, target_column, time_limit, save_path, stop_event=None, time_column=None,
                 prediction_length_percent=None, eval_metric=None, excluded_model_types=None,
-                num_bag_folds=None, val_size=None):
+                num_bag_folds=None, val_size=None, progress=None):
     try:
         save_path = os.path.abspath(save_path)
 
@@ -246,7 +248,8 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
         if time_column:
             return train_model_timeseries(
                 df, target_column, time_column, time_limit, save_path, stop_event, plot_dir,
-                prediction_length_percent, eval_metric=eval_metric, excluded_model_types=excluded_model_types
+                prediction_length_percent, eval_metric=eval_metric, excluded_model_types=excluded_model_types,
+                progress=progress
             )
 
         # When bagging is disabled, split off a held-out validation set.
@@ -275,10 +278,24 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
         if num_bag_folds:
             # All rows participate in OOF evaluation — no holdout withheld.
             fit_kwargs['use_bag_holdout'] = False
+            if os.getenv('AUTOML_PARALLEL_FOLDS', '0').lower() not in ('1', 'true', 'yes'):
+                # Fit folds one after another instead of in parallel Ray workers.
+                # In a long-lived server process the Ray runtime of a previous run
+                # breaks the next one ("Broken pipe"), silently dropping most models.
+                fit_kwargs['ag_args_ensemble'] = {'fold_fitting_strategy': 'sequential_local'}
         if df_val is not None:
             # Tell AutoGluon to use the same val split for its own model selection,
             # so leaderboard score_val and our metrics are on identical data.
             fit_kwargs['tuning_data'] = df_val
+        # Real per-model progress, and a stop button that takes effect between models
+        fit_kwargs['callbacks'] = [ProgressCallback(progress, stop_event)] if progress is not None else []
+        used_gpu = gpu_available()
+        if used_gpu:
+            fit_kwargs['num_gpus'] = 1
+            fit_kwargs['hyperparameters'] = gpu_hyperparameters()
+            logging.info("GPU detected: training XGBoost, CatBoost and neural networks on GPU")
+        if progress is not None:
+            progress.gpu = used_gpu
         try:
             predictor.fit(df, **fit_kwargs)
         except ValueError as ve:
@@ -289,6 +306,15 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
                 predictor.fit(df, **fit_kwargs_retry)
             else:
                 raise
+
+        # The saved predictor must not depend on this run's callback
+        for cb in fit_kwargs['callbacks']:
+            cb.release()
+        if fit_kwargs['callbacks']:
+            predictor._trainer.callbacks = []
+            predictor._trainer.save()
+        if progress is not None:
+            progress.set_phase('evaluating')
 
         # ── Capture OOF predictions right after fit() ────────────────────────────
         # Used ONLY for plots (confusion matrix, ROC, F1 bar, RMSE scatter).
@@ -555,6 +581,7 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
             'feature_importance_plot': feature_importance_plot,
             'feature_importance': {str(k): float(v) for k, v in feature_importance_df['importance'].items() if np.isfinite(v)},
             'model_path': save_path,
+            'used_gpu': used_gpu,
             'leaderboard': leaderboard.to_dict(orient='records'),
             'summary_LLM' : summary
         }
@@ -569,7 +596,7 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
 
 
 def train_model_timeseries(df, target_column, time_column, time_limit, save_path, stop_event, plot_dir,
-                           prediction_length_percent=None, eval_metric=None, excluded_model_types=None):
+                           prediction_length_percent=None, eval_metric=None, excluded_model_types=None, progress=None):
     # Ensure datetime
     try:
         df[time_column] = pd.to_datetime(df[time_column])
@@ -607,7 +634,11 @@ def train_model_timeseries(df, target_column, time_column, time_limit, save_path
     ts_fit_kwargs = {'time_limit': time_limit, 'presets': 'medium_quality'}
     if excluded_model_types:
         ts_fit_kwargs['excluded_model_types'] = excluded_model_types
+    if progress is not None:
+        progress.set_phase('fitting')
     predictor.fit(train_data=ts_df, **ts_fit_kwargs)
+    if progress is not None:
+        progress.set_phase('evaluating')
     fit_elapsed = (datetime.now() - fit_start).total_seconds()
 
     if stop_event and stop_event.is_set():

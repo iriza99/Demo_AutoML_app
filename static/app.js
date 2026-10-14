@@ -20,9 +20,6 @@ let trainingId = null;
 let pollingIntervalTraining = null;
 let currentShapRequestId = null;
 let appMode = 1;                 // 1 = train, 2 = predict
-let trainingCountdownInterval = null;
-let trainingModelInterval = null;
-let trainingTotalSeconds = 0;
 let detectedTimeColumns = [];
 let wizardCurrentStep = 1;
 let wizardMaxStep = 1;
@@ -60,8 +57,6 @@ const ADVANCED_MODELS = {
     { value: "XGB", label: "XGBoost" },
     { value: "RF", label: "Random Forest" },
     { value: "XT", label: "Extra Trees" },
-    { value: "KNN", label: "KNN" },
-    { value: "LR", label: "Linear" },
     { value: "NN_TORCH", label: "Neural net" },
     { value: "FASTAI", label: "FastAI" },
   ],
@@ -135,6 +130,12 @@ function isProbablyDate(val) {
 // Safe inline-handler argument: a JSON string literal, HTML-escaped for the attribute
 function jsArg(value) {
   return esc(JSON.stringify(String(value)));
+}
+
+// crypto.randomUUID only exists on https/localhost; the app is often opened via a LAN IP
+function uid() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function downloadBlob(blob, filename) {
@@ -787,13 +788,11 @@ function startTraining() {
   if (!useCv) formData.append("val_size", (parseInt($("adv-val-size").value, 10) / 100).toFixed(2));
 
   invalidateResults();
-  const panelModels = selectedModels.map(cb => ({ value: cb.value, label: cb.nextElementSibling.textContent }));
   $("start-training-btn").hidden = true;
   $("stop-training-btn").hidden = false;
-  initTrainingPanel(panelModels, lastDatasetName, target);
-  startTrainingCountdown(minutes * 60);
-  startModelAnimation(panelModels.length, minutes * 60);
-  showTrainingOverlay(true);
+  $("stop-training-btn").disabled = false;
+  $("stop-training-btn").textContent = t("stopTraining");
+  startProgress(Math.max(60, minutes * 60));
   $("training-panel").scrollIntoView({ behavior: "smooth", block: "nearest" });
 
   fetch("/train", { method: "POST", body: formData })
@@ -815,29 +814,25 @@ function startTraining() {
 
 function stopTraining() {
   if (!trainingId) { resetTrainingButtons(); return; }
+  // AutoGluon cannot interrupt the model it is fitting: the run ends after it
+  $("stop-training-btn").disabled = true;
+  $("stop-training-btn").textContent = t("stoppingTraining");
   fetch(`/stop_training/${trainingId}`, { method: "POST" })
     .then(r => r.json())
-    .then((data) => {
-      if (data.error) { showAlert(t("stopTrainingError"), "error"); return; }
-      clearInterval(pollingIntervalTraining);
-      pollingIntervalTraining = null;
-      showAlert(t("trainingStopped"), "warning", 4000);
-      resetTrainingButtons();
-    })
-    .catch(() => { showAlert(t("stopTrainingError"), "error"); resetTrainingButtons(); });
+    .then((data) => { if (data.error) resetTrainingButtons(); })
+    .catch(() => { showAlert(t("stopTrainingError"), "error"); });
 }
 
 function resetTrainingButtons() {
   $("start-training-btn").hidden = false;
   $("stop-training-btn").hidden = true;
-  stopTrainingCountdown();
-  stopModelAnimation();
-  showTrainingOverlay(false);
+  stopProgress();
 }
 
 function pollTrainingResult(id) {
   clearInterval(pollingIntervalTraining);
   pollingIntervalTraining = setInterval(() => {
+    fetch(`/training_progress/${id}`).then(r => (r.ok ? r.json() : null)).then(p => { if (p) renderProgress(p); }).catch(() => {});
     fetch(`/training_result/${id}`)
       .then(res => (res.status === 202 ? null : res.json()))
       .then((result) => {
@@ -845,7 +840,8 @@ function pollTrainingResult(id) {
         clearInterval(pollingIntervalTraining);
         pollingIntervalTraining = null;
         resetTrainingButtons();
-        if (result.error) showAlert(t(result.error) !== result.error ? t(result.error) : t("trainingErrorGet"), "error");
+        if (result.error === "training_interrupted") showAlert(t("trainingStopped"), "warning", 5000);
+        else if (result.error) showAlert(t(result.error) !== result.error ? t(result.error) : t("trainingErrorGet"), "error");
         else renderTrainingResults(result);
       })
       .catch(() => {
@@ -853,103 +849,87 @@ function pollTrainingResult(id) {
         showAlert(t("trainingErrorNetwork"), "error");
         resetTrainingButtons();
       });
-  }, 2000);
+  }, 1500);
 }
 
-// ── Training progress panel ──────────────────────────────────────────────────
-const RING = 238.76; // 2·π·38
+// ── Training progress (reported by AutoGluon, nothing simulated) ──────────────
+let progressTimer = null;
+let progressStart = 0;
+let progressLimit = 0;
+let lastProgress = null;
 
-function showTrainingOverlay(show) {
-  $("training-panel").classList.toggle("visible", show);
+const MODEL_LABELS = [
+  [/^LightGBMXT/, "LightGBM (extra trees)"], [/^LightGBMLarge/, "LightGBM (large)"], [/^LightGBM/, "LightGBM"],
+  [/^CatBoost/, "CatBoost"], [/^XGBoost/, "XGBoost"], [/^RandomForest/, "Random Forest"], [/^ExtraTrees/, "Extra Trees"],
+  [/^NeuralNetTorch/, "nnTorch"], [/^NeuralNetFastAI/, "nnFastAI"], [/^KNeighbors/, "KNN"], [/^LinearModel/, "linear"],
+  [/^WeightedEnsemble/, "ensemble"],
+];
+
+function modelLabel(name) {
+  const match = MODEL_LABELS.find(([re]) => re.test(name));
+  if (!match) return name;
+  const label = match[1];
+  return { nnTorch: t("modelNeuralNet"), nnFastAI: `${t("modelNeuralNet")} (FastAI)`, linear: t("modelLinear"), ensemble: t("modelEnsemble") }[label] || label;
 }
 
-function stopTrainingCountdown() {
-  clearInterval(trainingCountdownInterval);
-  trainingCountdownInterval = null;
-  $("training-countdown").textContent = "--:--";
-  $("tp-ring-fill").style.strokeDashoffset = String(RING);
-  $("tp-progress-fill").style.width = "0%";
-  $("tp-progress-pct").textContent = "0%";
-  document.querySelector(".tp-pulse-dot").classList.remove("finalizing");
-  document.querySelector(".tp-title").textContent = t("trainingOverlayTitle");
+function clock(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-function startTrainingCountdown(totalSeconds) {
-  stopTrainingCountdown();
-  trainingTotalSeconds = Math.max(1, totalSeconds);
-  let remaining = Math.floor(totalSeconds);
-  const render = () => {
-    $("training-countdown").textContent = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}`;
-    const done = 1 - remaining / trainingTotalSeconds;
-    $("tp-ring-fill").style.strokeDashoffset = String(RING * (1 - done));
-    $("tp-progress-fill").style.width = `${(done * 100).toFixed(1)}%`;
-    $("tp-progress-pct").textContent = `${Math.round(done * 100)}%`;
-  };
-  render();
-  trainingCountdownInterval = setInterval(() => {
-    remaining = Math.max(0, remaining - 1);
-    render();
-    if (remaining <= 0) {
-      clearInterval(trainingCountdownInterval);
-      trainingCountdownInterval = null;
-      showFinalizingState();
-    }
-  }, 1000);
+function startProgress(limitSeconds) {
+  stopProgress();
+  progressStart = Date.now();
+  progressLimit = limitSeconds;
+  lastProgress = null;
+  $("tp-models-list").innerHTML = "";
+  $("tp-gpu").hidden = true;
+  $("tp-limit").textContent = t("ofMaximum", { limit: clock(limitSeconds) });
+  renderProgress({ phase: "preparing", elapsed: 0, models: [] });
+  $("training-panel").classList.add("visible");
+  progressTimer = setInterval(() => renderProgressClock(), 1000);
 }
 
-function showFinalizingState() {
-  stopModelAnimation();
-  document.querySelector(".tp-pulse-dot").classList.add("finalizing");
-  document.querySelector(".tp-title").textContent = t("finalizingTitle");
-  const list = $("tp-models-list");
-  if (list.querySelector(".tp-divider")) return;
-  list.insertAdjacentHTML("beforeend", `<div class="tp-divider"></div>` +
-    ["finalizingOOF", "finalizingFeatureImportance", "finalizingPlots", "finalizingReport"].map(k =>
-      `<div class="tp-model-row training"><span class="tp-model-icon spin">↻</span><span class="tp-model-name">${t(k)}</span></div>`).join(""));
-  list.lastElementChild?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+function stopProgress() {
+  clearInterval(progressTimer);
+  progressTimer = null;
+  $("training-panel").classList.remove("visible");
 }
 
-function initTrainingPanel(models, datasetName, target) {
-  $("tp-dataset-name").textContent = datasetName;
-  $("tp-target-col").textContent = `→ ${target}`;
-  $("tp-models-list").innerHTML = models.map((m, i) => `
-    <div class="tp-model-row pending" id="tp-model-${i}">
-      <span class="tp-model-icon">○</span><span class="tp-model-name">${esc(m.label)}</span>
-      <span class="tp-model-badge">${t("modelPending")}</span></div>`).join("");
+function renderProgressClock() {
+  const elapsed = (Date.now() - progressStart) / 1000;
+  $("tp-elapsed").textContent = clock(elapsed);
+  const evaluating = lastProgress && lastProgress.phase === "evaluating";
+  const bar = $("tp-progress-fill");
+  bar.classList.toggle("indeterminate", Boolean(evaluating));
+  bar.style.width = evaluating ? "" : `${Math.min(100, (elapsed / progressLimit) * 100).toFixed(1)}%`;
 }
 
-function startModelAnimation(nModels, totalSeconds) {
-  clearInterval(trainingModelInterval);
-  if (!nModels) return;
-  let idx = 0;
-  const perModel = Math.max(3000, (totalSeconds * 1000) / nModels);
-  markModel(idx, "training");
-  trainingModelInterval = setInterval(() => {
-    markModel(idx, "done");
-    idx += 1;
-    if (idx < nModels) markModel(idx, "training");
-    else { clearInterval(trainingModelInterval); trainingModelInterval = null; }
-  }, perModel);
-}
-
-function markModel(idx, state) {
-  const row = $(`tp-model-${idx}`);
-  if (!row) return;
-  row.className = `tp-model-row ${state}`;
-  const icon = row.querySelector(".tp-model-icon");
-  icon.className = state === "training" ? "tp-model-icon spin" : "tp-model-icon";
-  icon.textContent = state === "training" ? "↻" : "✓";
-  row.querySelector(".tp-model-badge").textContent = t(state === "training" ? "modelTraining" : "modelDone");
-  if (state === "training") row.scrollIntoView({ behavior: "smooth", block: "nearest" });
-}
-
-function stopModelAnimation() {
-  clearInterval(trainingModelInterval);
-  trainingModelInterval = null;
-  document.querySelectorAll(".tp-model-row.pending, .tp-model-row.training").forEach((row) => {
-    if (!row.id) return;
-    markModel(parseInt(row.id.replace("tp-model-", ""), 10), "done");
-  });
+function renderProgress(p) {
+  lastProgress = p;
+  if (typeof p.elapsed === "number" && p.elapsed > 0) progressStart = Date.now() - p.elapsed * 1000;
+  const done = p.models.filter(m => m.status === "done" && !m.ensemble).length;
+  const phaseText = p.stopping ? t("phaseStopping")
+    : p.phase === "fitting" ? t("phaseFitting", { n: done })
+    : p.phase === "evaluating" ? t("phaseEvaluating")
+    : p.phase === "done" ? t("phaseDone")
+    : t("phasePreparing");
+  $("tp-phase").textContent = phaseText;
+  $("tp-note").textContent = p.phase === "evaluating" ? t("progressNoteEvaluating") : t("progressNote");
+  $("tp-gpu").hidden = !p.gpu;
+  const metricLabel = METRIC_INFO[p.metric]?.label || (p.metric || "").toUpperCase();
+  $("tp-models-list").innerHTML = p.models.slice().reverse().map((m) => {
+    const icon = m.status === "running" ? '<span class="tp-model-icon spin">↻</span>'
+      : m.status === "done" ? '<span class="tp-model-icon">✓</span>'
+      : m.status === "failed" ? '<span class="tp-model-icon">✕</span>' : '<span class="tp-model-icon">–</span>';
+    const detail = m.status === "running" ? t("modelTraining")
+      : m.status === "failed" ? t("modelFailed")
+      : m.status === "unavailable" ? t("modelUnavailable")
+      : m.status === "skipped" ? t("modelSkipped")
+      : `${m.score != null ? `${fmt(m.score)} ${metricLabel}` : ""}${m.fit_time != null ? ` · ${fmt(m.fit_time, 1)} s` : ""}`;
+    return `<div class="tp-model-row ${m.status}" title="${esc(m.name)}">${icon}<span class="tp-model-name">${esc(modelLabel(m.name))}</span><span class="tp-model-badge">${detail}</span></div>`;
+  }).join("");
+  renderProgressClock();
 }
 
 // ── Step 3 · Results ─────────────────────────────────────────────────────────
@@ -1055,7 +1035,7 @@ function renderTrainingResults(data, { silent = false } = {}) {
       <div>
         <span class="eyebrow">${t("bestModel")}</span>
         <h2 class="mono">${esc(data.best_model)}</h2>
-        <p class="muted">${taskLabel} · ${t("target")}: <strong>${esc(lastUsedTargetColumn || "")}</strong> · ${fmt(data.train_time, 0)} s</p>
+        <p class="muted">${taskLabel} · ${t("target")}: <strong>${esc(lastUsedTargetColumn || "")}</strong> · ${fmt(data.train_time, 0)} s ${data.used_gpu ? '<span class="pill pill-ok">GPU</span>' : ""}</p>
       </div>
       <div class="results-actions">
         <a class="btn btn-primary" href="${data.download_url || "#"}" download>
@@ -1108,7 +1088,7 @@ async function generateShapPlot() {
     showAlert(t("missingSHAPInfo"), "error");
     return;
   }
-  const requestId = crypto.randomUUID();
+  const requestId = uid();
   currentShapRequestId = requestId;
   const button = $("generate-shap-button");
   const spinner = $("training-spinner-shap");
@@ -1421,6 +1401,7 @@ async function sendChat(preset) {
           metrics_plot: summaryResults.metrics_plot, forecast_plot: summaryResults.forecast_plot,
         };
         if (shapPlot) payload.shap_summary_plot = shapPlot;
+        if (lastResult.feature_importance) payload.feature_importance = lastResult.feature_importance;
         payload.model_metadata = {
           task_type: summaryResults.task_type, best_model: summaryResults.best_model,
           target_column: lastUsedTargetColumn || null, prediction_length: summaryResults.prediction_length || null,
@@ -1449,7 +1430,7 @@ async function sendChat(preset) {
         showGroqModal();
         return;
       }
-      addChatMessage("ai error", esc(t(data.error || "error_chat")));
+      addChatMessage("ai error", esc(t(data.error || "error_chat")) + (data.detail ? `<br><small>${esc(data.detail)}</small>` : ""));
       return;
     }
     addChatMessage("ai", typeof marked !== "undefined" ? marked.parse(data.response) : esc(data.response));

@@ -82,6 +82,21 @@ FLASK_DEBUG=1
 ```
 
 Get a free API key at [console.groq.com/keys](https://console.groq.com/keys). Do **not** commit this file.
+Without a key in `.env`, the app asks for one in the browser the first time the assistant is opened.
+
+Optional settings (all can go in `.env`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GROQ_MODEL` | `openai/gpt-oss-120b` | Groq model for the assistant and the PDF report. Change it when Groq retires a model. |
+| `GROQ_VISION` | `0` | Set to `1` only if `GROQ_MODEL` accepts images; the assistant then also sees the plots. |
+| `AUTOML_GPU` | `auto` | `auto` trains XGBoost, CatBoost and the neural networks on the GPU when PyTorch sees one; `0` forces CPU. |
+| `AUTOML_PARALLEL_FOLDS` | `0` | `1` fits cross-validation folds in parallel with Ray. Faster, but in a long-running server later trainings can lose most models to Ray "Broken pipe" errors. |
+| `MAX_UPLOAD_MB` | `500` | Maximum upload size (trained model ZIPs are usually 10–50 MB). |
+
+**Using an NVIDIA GPU.** On Windows, `pip` installs a CPU-only PyTorch by default. Install a CUDA build that matches your driver, for example
+`pip install torch --index-url https://download.pytorch.org/whl/cu124`, and check it with
+`python -c "import torch; print(torch.cuda.is_available())"`. When a GPU is used, the results show a *GPU* badge.
 
 ### Run
 
