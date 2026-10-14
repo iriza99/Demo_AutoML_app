@@ -1390,7 +1390,7 @@ async function sendChat(preset) {
   const typing = addChatMessage("ai typing", "<span></span><span></span><span></span>");
 
   try {
-    const payload = { message, lang: currentLang() };
+    const payload = { message, lang: currentLang(), app_state: appState(), history: chatHistory.slice(-12) };
     if (typeof STUDY !== "undefined" && STUDY && STUDY.sessionId) payload.study_session_id = STUDY.sessionId;
     const groqKey = getGroqKey();
     if (groqKey) payload.groq_api_key = groqKey;
@@ -1433,7 +1433,13 @@ async function sendChat(preset) {
       addChatMessage("ai error", esc(t(data.error || "error_chat")) + (data.detail ? `<br><small>${esc(data.detail)}</small>` : ""));
       return;
     }
-    addChatMessage("ai", typeof marked !== "undefined" ? marked.parse(data.response) : esc(data.response));
+    const actions = Array.isArray(data.actions) ? data.actions : [];
+    const text = data.response || (actions.length ? t("actionsIntro") : "");
+    // Model output is escaped before Markdown rendering: it may quote dataset values
+    if (text) addChatMessage("ai", typeof marked !== "undefined" ? marked.parse(esc(text)) : esc(text));
+    if (actions.length) renderActionCards(actions);
+    chatHistory.push({ role: "user", content: message });
+    chatHistory.push({ role: "assistant", content: text + (actions.length ? `\n[${t("actionsProposedNote")}: ${actions.map(describeAction).join("; ")}]` : "") });
   } catch (_) {
     typing.remove();
     addChatMessage("ai error", esc(t("error_chat")));
@@ -1442,6 +1448,170 @@ async function sendChat(preset) {
     sendButton.disabled = false;
     input.focus();
   }
+}
+
+// ── Assistant actions ────────────────────────────────────────────────────────
+// The assistant only proposes; nothing changes until the user clicks "Apply".
+const chatHistory = [];
+const RESULT_TABS = { performance: "perf", importance: "importance", shap: "shap", models: "models" };
+
+function appState() {
+  const state = {
+    mode: appMode === 1 ? "train" : "predict",
+    step: ["", "data", "train", "results"][wizardCurrentStep] || "data",
+    actions_enabled: !(typeof STUDY !== "undefined" && STUDY),
+    dataset: null,
+  };
+  if (datasetLoaded) {
+    const target = $("target-column").value;
+    state.dataset = {
+      name: lastDatasetName, rows: totalDataRows,
+      columns: dataSetStats.slice(0, 300).map(s => ({
+        name: s.name, type: s.type, missing_pct: +(100 * s.missing / (totalDataRows || 1)).toFixed(1), unique: s.unique,
+      })),
+    };
+    state.target = target;
+    state.task = taskTypeFor(target);
+    state.excluded = getDroppedColumns();
+    state.metric = $("adv-eval-metric").value;
+    state.metric_options = Array.from($("adv-eval-metric").options).map(o => o.value);
+    state.time_minutes = parseInt($("training-time-limit").value, 10);
+    state.cross_validation = $("adv-use-cv").checked;
+    state.training_running = !$("stop-training-btn").hidden;
+  }
+  if (lastResult) {
+    const importance = Object.entries(lastResult.feature_importance || {}).sort((a, b) => b[1] - a[1]).slice(0, 10);
+    state.results = {
+      best_model: lastResult.best_model,
+      task_type: lastResult.task_type,
+      metrics: Object.fromEntries(metricEntries(lastResult).map(([k, m]) => [k, +m.value.toFixed(4)])),
+      top_importance: Object.fromEntries(importance.map(([k, v]) => [k, +v.toFixed(4)])),
+      tabs: Array.from(document.querySelectorAll("#training-results .tab")).map(b =>
+        Object.keys(RESULT_TABS).find(k => RESULT_TABS[k] === b.dataset.tab)).filter(Boolean),
+    };
+  }
+  return state;
+}
+
+function describeAction({ name, args }) {
+  const list = (cols) => cols.map(c => `«${c}»`).join(", ");
+  const label = {
+    exclude_variables: () => t("act_exclude", { cols: list(args.columns) }),
+    include_variables: () => t("act_include", { cols: list(args.columns) }),
+    set_target: () => t("act_target", { col: args.column }),
+    set_metric: () => t("act_metric", { metric: METRIC_INFO[args.metric]?.label || $("adv-eval-metric").querySelector(`option[value="${CSS.escape(args.metric)}"]`)?.textContent || args.metric }),
+    set_training_time: () => t("act_time", { time: formatMinutes(args.minutes) }),
+    set_cross_validation: () => t(args.enabled ? "act_cv_on" : "act_cv_off"),
+    start_training: () => t("act_train"),
+    go_to_step: () => t("act_step", { step: t({ data: "stepData", train: "stepTrain", results: "stepResults" }[args.step]) }),
+    show_results_tab: () => t("act_tab", { tab: t({ performance: "tabPerformance", importance: "tabImportance", shap: "tabShap", models: "tabModels" }[args.tab]) }),
+    generate_shap: () => t("act_shap"),
+    switch_mode: () => t(args.mode === "predict" ? "act_mode_predict" : "act_mode_train"),
+  }[name];
+  return label ? label() : name;
+}
+
+function setVariablesIncluded(columns, include) {
+  const target = $("target-column").value;
+  let changed = 0;
+  columns.forEach((col) => {
+    if (col === target) return;
+    const cb = document.querySelector(`#vars-table .var-include[value="${CSS.escape(col)}"]`);
+    if (cb && cb.checked !== include) {
+      cb.checked = include;
+      cb.dispatchEvent(new Event("change", { bubbles: true }));
+      changed += 1;
+    }
+  });
+  if (!changed) throw new Error(t("actNothingToChange"));
+  setWizardStep(STEP.DATA);
+}
+
+function setSelect(id, value) {
+  const select = $(id);
+  if (!Array.from(select.options).some(o => o.value === value)) throw new Error(t("actInvalid"));
+  select.value = value;
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+const ACTIONS = {
+  exclude_variables: ({ columns }) => setVariablesIncluded(columns, false),
+  include_variables: ({ columns }) => setVariablesIncluded(columns, true),
+  set_target: ({ column }) => { setSelect("target-column", column); setWizardStep(STEP.TRAIN); },
+  set_metric: ({ metric }) => { setSelect("adv-eval-metric", metric); setWizardStep(STEP.TRAIN); $("advanced-options-section").open = true; },
+  set_training_time: ({ minutes }) => {
+    const slider = $("training-time-limit");
+    slider.value = String(Math.max(1, Math.min(180, minutes)));
+    slider.dispatchEvent(new Event("change", { bubbles: true }));
+    updateTimeDisplay();
+    setWizardStep(STEP.TRAIN);
+  },
+  set_cross_validation: ({ enabled }) => {
+    const cb = $("adv-use-cv");
+    cb.checked = enabled;
+    cb.dispatchEvent(new Event("change", { bubbles: true }));
+    toggleValSplit();
+    setWizardStep(STEP.TRAIN);
+    $("advanced-options-section").open = true;
+  },
+  start_training: () => { setWizardStep(STEP.TRAIN); startTraining(); },
+  go_to_step: ({ step }) => setWizardStep({ data: STEP.DATA, train: STEP.TRAIN, results: STEP.RESULTS }[step]),
+  show_results_tab: ({ tab }) => { setWizardStep(STEP.RESULTS); setResultsTab(RESULT_TABS[tab]); },
+  generate_shap: () => { setWizardStep(STEP.RESULTS); setResultsTab("shap"); generateShapPlot(); },
+  switch_mode: ({ mode }) => setMode(mode),
+};
+
+function applyAction(action, card) {
+  const status = card.querySelector(".action-status");
+  try {
+    if (!ACTIONS[action.name]) throw new Error(t("actInvalid"));
+    ACTIONS[action.name](action.args || {});
+    card.classList.add("applied");
+    status.textContent = `✓ ${t("actApplied")}`;
+    chatHistory.push({ role: "user", content: `[${t("actionAppliedNote")}: ${describeAction(action)}]` });
+  } catch (err) {
+    card.classList.add("failed");
+    status.textContent = `✕ ${err.message || t("actInvalid")}`;
+  }
+  card.querySelectorAll("button").forEach(b => { b.disabled = true; });
+}
+
+function renderActionCards(actions) {
+  const box = document.createElement("div");
+  box.className = "action-list";
+  actions.forEach((action) => {
+    const card = document.createElement("div");
+    card.className = "action-card";
+    card.innerHTML = `<span class="action-label">${esc(describeAction(action))}</span>
+      <span class="action-status muted"></span>
+      <div class="action-buttons">
+        <button type="button" class="btn btn-primary btn-sm">${t("actApply")}</button>
+        <button type="button" class="btn btn-ghost btn-sm">${t("actDismiss")}</button>
+      </div>`;
+    const [apply, dismiss] = card.querySelectorAll("button");
+    apply.addEventListener("click", () => applyAction(action, card));
+    dismiss.addEventListener("click", () => {
+      card.classList.add("dismissed");
+      card.querySelector(".action-status").textContent = t("actDismissed");
+      card.querySelectorAll("button").forEach(b => { b.disabled = true; });
+    });
+    box.appendChild(card);
+  });
+  if (actions.length > 1) {
+    const all = document.createElement("button");
+    all.type = "button";
+    all.className = "btn btn-secondary btn-sm action-apply-all";
+    all.textContent = t("actApplyAll");
+    all.addEventListener("click", () => {
+      box.querySelectorAll(".action-card:not(.applied):not(.dismissed):not(.failed)").forEach((card, i) => {
+        applyAction(actions[Array.from(box.querySelectorAll(".action-card")).indexOf(card)], card);
+      });
+      all.disabled = true;
+    });
+    box.appendChild(all);
+  }
+  $("chat-box").appendChild(box);
+  $("chat-box").scrollTop = $("chat-box").scrollHeight;
 }
 
 // ── Toast ────────────────────────────────────────────────────────────────────

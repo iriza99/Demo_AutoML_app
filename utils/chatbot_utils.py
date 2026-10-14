@@ -1,5 +1,6 @@
 from groq import Groq
-from utils.prompts import get_system_prompt_chat, get_keywords_by_lang, get_system_prompt_preprocessing, get_system_prompt_explanation_plot
+from utils.assistant_tools import TOOL_INSTRUCTIONS, build_tools, parse_tool_calls
+from utils.prompts import get_system_prompt_chat, get_system_prompt_preprocessing, get_system_prompt_explanation_plot
 import os
 import logging
 from reportlab.lib.pagesizes import A4
@@ -13,6 +14,7 @@ from datetime import datetime
 import io
 import base64
 import re
+import json
 
 def server_groq_key():
     """Groq key from the environment (.env is loaded by app.py after this import)."""
@@ -44,8 +46,7 @@ def _text_only(messages):
     return out
 
 
-def groq_complete(api_key, messages, max_tokens=1024, temperature=0.7):
-    """Single entry point for Groq chat completions."""
+def _groq_request(api_key, messages, max_tokens, temperature, tools=None):
     model = groq_model()
     if not groq_supports_images():
         messages = _text_only(messages)
@@ -55,6 +56,9 @@ def groq_complete(api_key, messages, max_tokens=1024, temperature=0.7):
         # Sent through extra_body because older groq SDKs do not know the argument.
         kwargs['extra_body'] = {'reasoning_effort': 'low'}
         max_tokens = max_tokens * 2
+    if tools:
+        kwargs['tools'] = tools
+        kwargs['tool_choice'] = 'auto'
     client = Groq(api_key=api_key)
     completion = client.chat.completions.create(
         model=model,
@@ -65,16 +69,57 @@ def groq_complete(api_key, messages, max_tokens=1024, temperature=0.7):
         stream=False,
         **kwargs,
     )
-    return completion.choices[0].message.content or ''
+    return completion.choices[0].message
+
+
+def groq_complete(api_key, messages, max_tokens=1024, temperature=0.7):
+    """Single entry point for plain Groq chat completions."""
+    return _groq_request(api_key, messages, max_tokens, temperature).content or ''
+
+
+def groq_chat_with_tools(api_key, messages, tools, max_tokens=1024, temperature=0.5):
+    """Completion that may return tool calls; falls back to plain text if tool use fails."""
+    try:
+        message = _groq_request(api_key, messages, max_tokens, temperature, tools=tools)
+        return message.content or '', getattr(message, 'tool_calls', None) or []
+    except Exception as exc:
+        # Groq answers 400 "tool_use_failed" when the model writes a malformed call
+        if 'tool' not in str(exc).lower():
+            raise
+        logging.warning(f"Tool use failed, answering without actions: {exc}")
+        return groq_complete(api_key, messages, max_tokens, temperature), []
+
 
 def clean_markdown(text):
     # Remove markdown bold and italic markers from text
     return re.sub(r'(\*\*|\*)', '', text)
 
-def handle_chat_request(data, extra_system=''):
+MAX_HISTORY = 12
+
+
+def _history(data):
+    """Previous turns sent by the browser: plain user/assistant text only."""
+    out = []
+    for item in (data.get('history') or [])[-MAX_HISTORY:]:
+        if isinstance(item, dict) and item.get('role') in ('user', 'assistant') and isinstance(item.get('content'), str):
+            out.append({'role': item['role'], 'content': item['content'][:2000]})
+    return out
+
+
+def _state_summary(state):
+    """Compact JSON of what the user currently sees in the app."""
+    try:
+        return json.dumps(state, ensure_ascii=False, default=str)[:6000]
+    except (TypeError, ValueError):
+        return ''
+
+
+def handle_chat_request(data, extra_system='', allow_actions=True):
     """
-    Handles a chat request by preparing the context and sending it to the Groq API.
-    It builds the conversation history, attaches dataset previews, stats, plots, etc.
+    Answer a chat message with the app context, and optionally propose app actions.
+
+    Returns {"response": text, "actions": [{"name", "args"}, ...]}. Actions are
+    proposals only; the browser applies them when the user confirms.
     """
     user_input = data.get('message', '')
     if not user_input:
@@ -98,12 +143,14 @@ def handle_chat_request(data, extra_system=''):
     if extra_system:
         messages.append({"role": "system", "content": extra_system})
 
-    # If the user asks about the dataset but none is provided, add a warning message
-    if dataset is None and any(kw in user_input.lower() for kw in get_keywords_by_lang(lang)):
-        messages.append({
-            "role": "assistant",
-            "content": "Je ne vois pas encore de dataset ou de résultats d'entraînement. Pour que je puisse vous aider, vous devez d’abord lancer un entraînement via l’interface avec vos données."
-        })
+    app_state = data.get('app_state') if isinstance(data.get('app_state'), dict) else None
+    use_tools = bool(allow_actions and app_state and app_state.get('actions_enabled'))
+    if app_state:
+        messages.append({"role": "system", "content":
+                         "Current state of the app the user is looking at (JSON). If no dataset is loaded, "
+                         "tell the user to upload one first.\n" + _state_summary(app_state)})
+    if use_tools:
+        messages.append({"role": "system", "content": TOOL_INSTRUCTIONS})
 
     # Append dataset preview, stats, training summary if available
     append_if_exists(messages, "Aperçu du dataset fourni :", dataset)
@@ -160,10 +207,14 @@ def handle_chat_request(data, extra_system=''):
         for name, plot in training_pred_plot.items():
             add_image_message(messages, f"Voici un des graphes {name} qui montre les résultats de l'entrainement du modèle qui sert à faire les prédictions.", plot)
 
-    # Add the user's message at the end
+    # Earlier turns, then the user's new message
+    messages.extend(_history(data))
     messages.append({"role": "user", "content": user_input})
 
-    return groq_complete(groq_key, messages, max_tokens=1024, temperature=0.7)
+    if not use_tools:
+        return {"response": groq_complete(groq_key, messages, max_tokens=1024, temperature=0.7), "actions": []}
+    text, tool_calls = groq_chat_with_tools(groq_key, messages, build_tools(app_state))
+    return {"response": text, "actions": parse_tool_calls(tool_calls, app_state)}
 
 def append_if_exists(messages, title, content):
     # Append a message to the conversation if content is not empty

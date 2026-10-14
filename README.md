@@ -10,7 +10,7 @@ A user-friendly web interface to train, evaluate, and deploy machine learning mo
 - **No-code, three-step interface** — *Data* (upload and review every variable) → *Train* (pick the target, time and optional settings) → *Results* (metrics, plots, downloads)
 - **Honest evaluation** — out-of-fold metrics with optional holdout split
 - **Explainability** — variable importance and SHAP beeswarm plots (TreeExplainer on the best tree model, about a second)
-- **LLM assistant** — answers questions about your results in plain language
+- **LLM assistant** — answers questions about your data and results in plain language, remembers the conversation and can *propose* actions (exclude variables, change the target, metric or time, start training, open a results tab). Each proposal appears as a card and only runs when you click *Apply*; actions are disabled in study mode
 - **Dark mode** and multilingual UI (English, French, Spanish)
 - **Download** trained models, plots, a PDF report and predictions; predict straight away with the model you just trained
 

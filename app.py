@@ -453,8 +453,9 @@ def chat():
         # In the adaptive study condition, condition the assistant on the inferred profile
         study_session = study_store.get(data.get('study_session_id') or '')
         extra_system = study_session.chat_instruction() if study_session else ''
-        response = handle_chat_request(data, extra_system=extra_system)
-        return jsonify({"response": response})
+        # In the user study the assistant must not act on the app: it would solve the traps
+        result = handle_chat_request(data, extra_system=extra_system, allow_actions=study_session is None)
+        return jsonify(result)
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
     except Exception as e:
