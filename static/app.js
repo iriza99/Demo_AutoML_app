@@ -15,7 +15,6 @@ let lastCleanedCsvBlob = null;
 let lastDatasetName = null;
 let shapPlot = null;
 let PlotsPredictionResults = null;
-let pngResultTrainingForPrediction = null;
 let trainingId = null;
 let pollingIntervalTraining = null;
 let currentShapRequestId = null;
@@ -25,6 +24,9 @@ let wizardCurrentStep = 1;
 let wizardMaxStep = 1;
 let datasetLoaded = false;
 let totalDataRows = 0;
+let lastTrainConfig = null;      // options used for the last training (shown in the technical details)
+let lastPredictionSummary = null;
+let expertMode = (() => { try { return localStorage.getItem("expertMode") === "1"; } catch (_) { return false; } })();
 
 const STEP = { DATA: 1, TRAIN: 2, RESULTS: 3 };
 const CDN = {
@@ -162,6 +164,8 @@ window.addEventListener("DOMContentLoaded", () => {
   $("language-select").value = lang;
   changeLanguage(lang);
   $("theme-toggle").checked = document.documentElement.dataset.theme === "dark";
+  $("expert-toggle").checked = expertMode;
+  applyExpertMode();
 
   initSettingsMenu();
   initDropzone();
@@ -206,6 +210,21 @@ function toggleDarkMode() {
   const dark = $("theme-toggle").checked;
   document.documentElement.dataset.theme = dark ? "dark" : "light";
   try { localStorage.setItem("theme", dark ? "dark" : "light"); } catch (_) { /* private mode */ }
+}
+
+function toggleExpertMode() {
+  expertMode = $("expert-toggle").checked;
+  try { localStorage.setItem("expertMode", expertMode ? "1" : "0"); } catch (_) { /* private mode */ }
+  applyExpertMode();
+}
+
+// Expert mode shows technical details (model names, configuration, all models) opened by default
+function applyExpertMode() {
+  document.body.classList.toggle("expert", expertMode);
+  const adv = $("advanced-options-section");
+  if (adv) adv.open = expertMode;
+  const details = $("res-models");
+  if (details) details.open = expertMode;
 }
 
 function changeLanguage(lang) {
@@ -532,6 +551,7 @@ function removeCSVFile() {
 function invalidateResults() {
   lastResult = null;
   shapPlot = null;
+  shapSummary = null;
   currentShapRequestId = null;
   $("training-results").innerHTML = "";
   if (wizardMaxStep > STEP.TRAIN) wizardMaxStep = STEP.TRAIN;
@@ -600,8 +620,16 @@ function updateAdvancedOptions() {
   const task = taskTypeFor($("target-column").value);
   const metricSelect = $("adv-eval-metric");
   const previousMetric = metricSelect.value;
-  metricSelect.innerHTML = ADVANCED_METRICS[task].map(m => `<option value="${m.value}">${m.label}</option>`).join("");
-  if (ADVANCED_METRICS[task].some(m => m.value === previousMetric)) metricSelect.value = previousMetric;
+  // Recommended default: ROC AUC for two classes (not fooled by imbalance), the first option otherwise
+  const targetStat = (dataSetStats || []).find(st => st.name === $("target-column").value);
+  const binary = task === "classification" && targetStat?.unique === 2;
+  let options = ADVANCED_METRICS[task];
+  if (task === "classification" && !binary) options = options.filter(m => m.value !== "roc_auc");
+  const recommended = binary ? "roc_auc" : options[0].value;
+  metricSelect.innerHTML = options.map(m => `<option value="${m.value}">${m.label}${m.value === recommended ? ` (${t("recommended")})` : ""}</option>`).join("");
+  const key = task + (binary ? ":2" : "");
+  metricSelect.value = options.some(m => m.value === previousMetric) && metricSelect.dataset.task === key ? previousMetric : recommended;
+  metricSelect.dataset.task = key;
 
   const models = task === "timeseries" ? ADVANCED_MODELS.timeseries : ADVANCED_MODELS.tabular;
   const container = $("adv-models-container");
@@ -613,7 +641,7 @@ function updateAdvancedOptions() {
 }
 
 function resetAdvancedOptions() {
-  $("advanced-options-section").open = false;
+  $("advanced-options-section").open = expertMode;
   $("adv-eval-metric").innerHTML = "";
   $("adv-models-container").innerHTML = "";
   $("adv-use-cv").checked = true;
@@ -787,6 +815,12 @@ function startTraining() {
   const useCv = $("adv-use-cv").checked;
   formData.append("use_cv", useCv ? "1" : "0");
   if (!useCv) formData.append("val_size", (parseInt($("adv-val-size").value, 10) / 100).toFixed(2));
+  lastTrainConfig = {
+    metricLabel: Object.values(ADVANCED_METRICS).flat().find(m => m.value === metric)?.label || metric || "—",
+    cv: useCv, valPct: parseInt($("adv-val-size").value, 10), minutes,
+    excluded: dropped.filter(c => c !== target),
+    families: Array.from($("adv-models-container").querySelectorAll("input:checked")).map(cb => cb.parentElement.textContent.trim()),
+  };
 
   invalidateResults();
   $("start-training-btn").hidden = true;
@@ -970,91 +1004,6 @@ function majorityShare(target) {
   datasetRows.slice(1).forEach(r => { if (!isMissing(r[idx])) counts.set(r[idx], (counts.get(r[idx]) || 0) + 1); });
   const total = [...counts.values()].reduce((a, b) => a + b, 0);
   return total ? Math.max(...counts.values()) / total : null;
-}
-
-function renderTrainingResults(data, { silent = false } = {}) {
-  lastResult = data;
-  lastTrainedModelPath = data.model_path;
-  dataSetPreview = data.markdown_preview || dataSetPreview;
-  summaryResults = {
-    summary: data.summary_LLM,
-    feature_importance_plot: data.feature_importance_plot,
-    metrics_plot: data.metrics,
-    forecast_plot: data.forecast_plot || null,
-    task_type: data.task_type,
-    best_model: data.best_model,
-    prediction_length: data.prediction_length || null,
-    train_time: data.train_time,
-  };
-  if (!silent) {
-    unlockWizardStep(STEP.RESULTS);
-    setWizardStep(STEP.RESULTS);
-    $("use-last-model-btn").hidden = !data.download_url;
-  }
-
-  const taskLabel = { binary: t("taskBinary"), multiclass: t("taskMulticlass"), regression: t("taskRegression"), timeseries: t("taskTimeseries") }[data.task_type] || data.task_type;
-  const baseline = ["binary", "multiclass"].includes(data.task_type) ? majorityShare(lastUsedTargetColumn) : null;
-
-  const kpis = metricEntries(data).map(([key, m]) => {
-    const info = METRIC_INFO[key] || { label: key.toUpperCase() };
-    const band = qualityBand(key, m.value);
-    let note = band ? `<span class="badge badge-${band}">${t(`quality_${band}`)}</span>` : "";
-    if (key === "accuracy" && baseline != null) {
-      note = `<span class="kpi-note">${t("baselineAccuracy")}: ${pct(baseline)}</span>`;
-    }
-    const value = ["accuracy"].includes(key) ? pct(m.value) : fmt(m.value);
-    return `<div class="kpi card"><span class="kpi-label">${info.label}</span><span class="kpi-value">${value}</span>${note}<span class="kpi-help">${t(`help_${key}`) !== `help_${key}` ? t(`help_${key}`) : ""}</span></div>`;
-  }).join("");
-
-  // Native charts when the raw data is available; the PNGs remain for downloads, the PDF and old results
-  const plots = data.plot_data ? renderNativeCharts(data.plot_data) : metricEntries(data).flatMap(([key, m]) => [m.plot, m.plot_hist].filter(Boolean).map((p, i) =>
-    `<figure class="plot card"><img src="data:image/png;base64,${p}" alt="${esc(key)}${i ? "_errors" : ""}" loading="lazy"><figcaption>${METRIC_INFO[key]?.label || key}</figcaption></figure>`));
-  if (data.forecast_plot) plots.push(`<figure class="plot card"><img src="data:image/png;base64,${data.forecast_plot}" alt="forecast" loading="lazy"><figcaption>${t("forecast")}</figcaption></figure>`);
-
-  const tabs = [
-    { id: "perf", label: t("tabPerformance"), html: plots.length ? `<div class="plot-grid">${plots.join("")}</div>` : `<p class="muted">${t("noPlots")}</p>` },
-  ];
-  if (data.feature_importance && Object.keys(data.feature_importance).length) {
-    tabs.push({ id: "importance", label: t("tabImportance"), html: renderImportance(data.feature_importance) });
-  }
-  if (data.task_type !== "timeseries") {
-    tabs.push({ id: "shap", label: t("tabShap"), html: `
-      <div class="card">
-        <p class="muted">${t("shapIntro")}</p>
-        <div class="row-gap">
-          <button id="generate-shap-button" class="btn btn-secondary" type="button" onclick="generateShapPlot()">${t("generateShap")}</button>
-          <div id="training-spinner-shap" class="spinner" hidden></div>
-        </div>
-        <div id="shap-plots">${shapPlot ? `<img src="data:image/png;base64,${shapPlot}" alt="shap_summary">` : ""}</div>
-      </div>` });
-  }
-  if (Array.isArray(data.leaderboard) && data.leaderboard.length) {
-    tabs.push({ id: "models", label: t("tabModels"), html: renderLeaderboard(data.leaderboard, data.best_model) });
-  }
-
-  $("training-results").innerHTML = `
-    <div class="results-head card">
-      <div>
-        <span class="eyebrow">${t("bestModel")}</span>
-        <h2 class="mono">${esc(data.best_model)}</h2>
-        <p class="muted">${taskLabel} · ${t("target")}: <strong>${esc(lastUsedTargetColumn || "")}</strong> · ${fmt(data.train_time, 0)} s ${data.used_gpu ? '<span class="pill pill-ok">GPU</span>' : ""}</p>
-      </div>
-      <div class="results-actions">
-        <a class="btn btn-primary" href="${data.download_url || "#"}" download>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12M7 11l5 5 5-5M4 20h16"/></svg>${t("downloadModel")}</a>
-        <button class="btn btn-secondary" type="button" onclick="downloadPDF()">${t("downloadPDF")}</button>
-        <button class="btn btn-ghost" type="button" onclick="downloadAllPlots()">${t("downloadPlots")}</button>
-        <button class="btn btn-ghost" type="button" onclick="useLastTrainedModel(true)">${t("predictWithModel")}</button>
-      </div>
-    </div>
-    <div class="kpi-grid">${kpis}</div>
-    <div class="tabs" role="tablist">${tabs.map((tab, i) => `<button class="tab ${i === 0 ? "active" : ""}" role="tab" data-tab="${tab.id}" onclick="setResultsTab('${tab.id}')">${tab.label}</button>`).join("")}</div>
-    ${tabs.map((tab, i) => `<div class="tab-panel" data-tab="${tab.id}" ${i === 0 ? "" : "hidden"}>${tab.html}</div>`).join("")}
-    <div class="ask-card card">
-      <div><strong>${t("askTitle")}</strong><p class="muted">${t("askText")}</p></div>
-      <button class="btn btn-secondary" type="button" onclick="openChatWith(${jsArg(t("suggestGood"))})">${t("askButton")}</button>
-    </div>`;
-  updateStepSubtitles();
 }
 
 // ── Native charts (same tokens as the UI, light and dark) ───────────────────
@@ -1247,19 +1196,269 @@ function errorHistogramChart(hist) {
   </figure>`;
 }
 
-function setResultsTab(id) {
-  document.querySelectorAll("#training-results .tab").forEach(b => b.classList.toggle("active", b.dataset.tab === id));
-  document.querySelectorAll("#training-results .tab-panel").forEach(p => { p.hidden = p.dataset.tab !== id; });
+function renderTrainingResults(data, { silent = false } = {}) {
+  lastResult = data;
+  lastTrainedModelPath = data.model_path;
+  dataSetPreview = data.markdown_preview || dataSetPreview;
+  summaryResults = {
+    summary: data.summary_LLM,
+    feature_importance_plot: data.feature_importance_plot,
+    metrics_plot: data.metrics,
+    forecast_plot: data.forecast_plot || null,
+    task_type: data.task_type,
+    best_model: data.best_model,
+    prediction_length: data.prediction_length || null,
+    train_time: data.train_time,
+  };
+  if (!silent) {
+    unlockWizardStep(STEP.RESULTS);
+    setWizardStep(STEP.RESULTS);
+    $("use-last-model-btn").hidden = !data.download_url;
+  }
+
+  const target = lastUsedTargetColumn || "";
+  const taskLabel = { binary: t("taskBinary"), multiclass: t("taskMulticlass"), regression: t("taskRegression"), timeseries: t("taskTimeseries") }[data.task_type] || data.task_type;
+  const baseline = ["binary", "multiclass"].includes(data.task_type) ? majorityShare(target) : null;
+  const main = metricEntries(data)[0];
+  const band = main ? qualityBand(main[0], main[1].value) : null;
+  const labels = data.plot_data?.labels;
+  const headline = !band ? t("verdictDone", { target })
+    : data.task_type === "binary" && labels?.length === 2 ? t(`verdictBin_${band}`, { a: labels[0], b: labels[1] })
+    : t(`verdict_${band}`, { target });
+
+  const tiles = metricEntries(data).map(([key, m]) => {
+    const info = METRIC_INFO[key] || { label: key.toUpperCase() };
+    const b = qualityBand(key, m.value);
+    const value = key === "accuracy" ? pct(m.value) : fmt(m.value);
+    const help = t(`help_${key}`) !== `help_${key}` ? t(`help_${key}`) : "";
+    let note = b ? `<span class="badge badge-${b}">${t(`quality_${b}`)}</span>` : "";
+    if (key === "accuracy" && baseline != null) note = `<span class="metric-note">${t("vsBaseline", { pct: pct(baseline) })}</span>`;
+    return `<div class="metric" title="${esc(help)}"><span class="metric-label">${info.label}</span><span class="metric-value">${value}</span>${note}<span class="metric-help">${esc(help)}</span></div>`;
+  }).join("");
+
+  // Native charts when the raw data is available; the PNGs remain for downloads, the PDF and old results
+  const plots = data.plot_data ? renderNativeCharts(data.plot_data) : metricEntries(data).flatMap(([key, m]) => [m.plot, m.plot_hist].filter(Boolean).map((p, i) =>
+    `<figure class="plot card"><img src="data:image/png;base64,${p}" alt="${esc(key)}${i ? "_errors" : ""}" loading="lazy"><figcaption>${METRIC_INFO[key]?.label || key}</figcaption></figure>`));
+  if (data.forecast_plot) plots.push(`<figure class="plot card"><img src="data:image/png;base64,${data.forecast_plot}" alt="forecast" loading="lazy"><figcaption>${t("forecast")}</figcaption></figure>`);
+
+  const hasImportance = data.feature_importance && Object.keys(data.feature_importance).length;
+  const hasShap = data.task_type !== "timeseries";
+  const sections = [{ id: "performance", label: t("secPerformance") }];
+  if (hasImportance || hasShap) sections.push({ id: "importance", label: t("secVariables") });
+  sections.push({ id: "models", label: t("secDetails") });
+
+  $("training-results").innerHTML = `
+    <div class="verdict card">
+      <div class="verdict-top">
+        <div class="verdict-text">
+          <span class="eyebrow">${taskLabel}</span>
+          <h2>${esc(headline)}</h2>
+          <p class="muted">${t("verdictSub", { rows: fmt(totalDataRows, 0), time: fmtDuration(data.train_time) })}
+            <span class="expert-only"> · ${t("bestModel")}: <span class="mono">${esc(data.best_model)}</span></span>
+            ${data.used_gpu ? ' <span class="pill pill-ok">GPU</span>' : ""}</p>
+        </div>
+        <div class="verdict-actions">
+          <button class="btn btn-primary" type="button" onclick="useLastTrainedModel(true)">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>${t("predictWithModel")}</button>
+          <a class="btn btn-secondary" href="${data.download_url || "#"}" download>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12M7 11l5 5 5-5M4 20h16"/></svg>${t("downloadModel")}</a>
+          <button class="btn btn-ghost" type="button" onclick="downloadPDF()">${t("downloadPDF")}</button>
+        </div>
+      </div>
+      ${tiles ? `<div class="metric-strip">${tiles}</div>` : ""}
+      ${renderResultChecks(data, baseline)}
+    </div>
+    <nav class="section-nav" aria-label="${esc(t("stepResults"))}">
+      ${sections.map(s => `<button type="button" class="chip-btn" onclick="showResultsSection('${s.id}')">${s.label}</button>`).join("")}
+      <button type="button" class="chip-btn chip-accent" onclick="openChatWith(${jsArg(t("suggestGood"))})">${t("askButton")}</button>
+    </nav>
+
+    <section class="res-section" id="res-performance">
+      <div class="res-head"><h3>${t("secPerformance")}</h3><p class="muted">${t("secPerformanceSub")}</p></div>
+      ${plots.length ? `<div class="plot-grid">${plots.join("")}</div>` : `<p class="muted">${t("noPlots")}</p>`}
+    </section>
+
+    ${hasImportance || hasShap ? `
+    <section class="res-section" id="res-importance">
+      <div class="res-head"><h3>${t("secVariables")}</h3><p class="muted">${t("secVariablesSub")}</p></div>
+      <div class="var-grid">
+        ${hasImportance ? renderImportance(data.feature_importance) : ""}
+        ${hasShap ? `<div class="card shap-card" id="res-shap">${renderShapBlock()}</div>` : ""}
+      </div>
+    </section>` : ""}
+
+    <details class="card res-details" id="res-models" ${expertMode ? "open" : ""}>
+      <summary><span>${t("secDetails")}</span><span class="muted">${t("secDetailsSub")}</span></summary>
+      ${renderTrainingDetails(data)}
+      ${Array.isArray(data.leaderboard) && data.leaderboard.length ? renderLeaderboard(data.leaderboard, data.best_model) : ""}
+      <div class="row-gap"><button class="btn btn-ghost btn-sm" type="button" onclick="downloadAllPlots()">${t("downloadPlots")}</button></div>
+    </details>`;
+  updateStepSubtitles();
+}
+
+function fmtDuration(seconds) {
+  if (typeof seconds !== "number") return "—";
+  if (seconds < 90) return `${fmt(seconds, 0)} s`;
+  return `${fmt(seconds / 60, 1)} min`;
+}
+
+// Automatic sanity checks on the results, in plain words, with a one-click fix when there is one
+function renderResultChecks(data, baseline) {
+  const checks = [];
+  const imp = Object.entries(data.feature_importance || {}).sort((a, b) => b[1] - a[1]);
+  const statsByName = Object.fromEntries((dataSetStats || []).map(s => [s.name, s]));
+  const rows = totalDataRows || 1;
+  imp.slice(0, 3).forEach(([col, v]) => {
+    const s = statsByName[col];
+    if (v > 0 && s && s.unique >= 0.95 * rows && s.type !== "Date" && (s.type === "Categorical" || /(^|_|\b)(id|code|cod|num|no|nr|number|record|episode|patient|nhc)(_|\b|$)/i.test(col) || s.unique === rows)) {
+      checks.push({ text: t("checkIdentifier", { col }), fix: col });
+    }
+  });
+  const main = metricEntries(data)[0];
+  const band = main ? qualityBand(main[0], main[1].value) : null;
+  if (imp.length > 2 && imp[0][1] > 0 && imp[0][1] > 4 * Math.max(imp[1][1], 1e-9) && band === "excellent" && !checks.some(c => c.fix === imp[0][0])) {
+    checks.push({ text: t("checkDominant", { col: imp[0][0] }), fix: imp[0][0] });
+  }
+  const acc = data.metrics?.accuracy?.value;
+  if (baseline != null && baseline >= 0.75 && typeof acc === "number") {
+    checks.push({ text: t(acc - baseline < 0.03 ? "checkNoBetter" : "checkImbalance", { pct: pct(baseline) }) });
+  }
+  if (band === "weak") checks.push({ text: t("checkWeak") });
+  if (!checks.length) return "";
+  return `<ul class="checks">${checks.map(c => `<li>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l10 18H2zM12 10v5M12 18h.01"/></svg>
+      <span>${esc(c.text)}</span>
+      ${c.fix ? `<button class="btn btn-ghost btn-sm" type="button" onclick="excludeAndRetrain(${jsArg(c.fix)})">${t("checkFix", { col: c.fix })}</button>` : ""}
+    </li>`).join("")}</ul>`;
+}
+
+function excludeAndRetrain(col) {
+  try { setVariablesIncluded([col], false); } catch (_) { /* already excluded */ }
+  setWizardStep(STEP.TRAIN);
+  showAlert(t("checkFixDone", { col }), "info", 5000);
+}
+
+function showResultsSection(id) {
+  setWizardStep(STEP.RESULTS);
+  const node = $({ performance: "res-performance", importance: "res-importance", shap: "res-shap", models: "res-models" }[id] || "res-performance");
+  if (!node) return;
+  if (node.tagName === "DETAILS") node.open = true;
+  setTimeout(() => node.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+}
+// Kept for older callers
+function setResultsTab(id) { showResultsSection({ perf: "performance" }[id] || id); }
+
+function renderTrainingDetails(data) {
+  const c = lastTrainConfig || {};
+  const rows = [
+    [t("task"), { binary: t("taskBinary"), multiclass: t("taskMulticlass"), regression: t("taskRegression"), timeseries: t("taskTimeseries") }[data.task_type] || data.task_type],
+    [t("target"), lastUsedTargetColumn],
+    [t("bestModel"), `<span class="mono">${esc(data.best_model)}</span>`],
+    [t("evalMetric"), c.metricLabel || "—"],
+    [t("evaluation"), c.cv === false ? t("evalHoldout", { pct: c.valPct }) : t("evalCv")],
+    [t("timeTitle"), `${fmtDuration(data.train_time)} / ${formatMinutes(c.minutes || 0)}`],
+    [t("excludedVars"), c.excluded?.length ? c.excluded.map(esc).join(", ") : t("none")],
+    [t("modelFamilies"), c.families?.length ? c.families.map(esc).join(", ") : "—"],
+    ["GPU", data.used_gpu ? t("yes") : t("no")],
+  ];
+  return `<dl class="details-list">${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>
+    <p class="muted small">${t("ensembleNote")}</p>`;
+}
+
+// ── SHAP ─────────────────────────────────────────────────────────────────────
+let shapSummary = null;
+
+function renderShapBlock() {
+  if (shapSummary) return shapChart(shapSummary);
+  if (shapPlot) return `<h4>${t("shapTitle")}</h4><img class="shap-img" src="data:image/png;base64,${shapPlot}" alt="shap_summary">`;
+  return `<h4>${t("shapTitle")}</h4>
+    <p class="muted">${t("shapIntro")}</p>
+    <div class="row-gap">
+      <button id="generate-shap-button" class="btn btn-secondary" type="button" onclick="generateShapPlot()">${t("generateShap")}</button>
+      <div id="training-spinner-shap" class="spinner" hidden></div>
+    </div>`;
+}
+
+function shapStep(f) { return f == null ? "na" : String(Math.max(0, Math.min(4, Math.round(f * 4)))); }
+
+function shapSentence(f, s) {
+  const d = f.direction;
+  const cls = s.explained_class;
+  const up = s.task === "regression" ? t("shapUpReg") : t("shapUpCls", { cls });
+  const down = s.task === "regression" ? t("shapDownReg") : t("shapDownCls", { cls });
+  if (f.levels && d != null && Math.abs(d) >= 0.3) {
+    return t("shapLevel", { col: f.name, level: f.levels[d > 0 ? 1 : 0], effect: up });
+  }
+  if (f.numeric && d != null && Math.abs(d) >= 0.3) {
+    return t(d > 0 ? "shapHigh" : "shapLow", { col: f.name, effect: up });
+  }
+  if (f.categories?.length && !f.levels) {
+    const top = [...f.categories].sort((a, b) => b.mean - a.mean)[0];
+    if (top && top.mean > 0) return t("shapLevel", { col: f.name, level: top.value, effect: up });
+  }
+  return t("shapMixed", { col: f.name, down });
+}
+
+function shapChart(s) {
+  const feats = s.features.slice(0, 10);
+  const w = 560, rowH = 34, m = { l: 150, r: 16, t: 8, b: 44 };
+  const h = m.t + m.b + rowH * feats.length;
+  const all = feats.flatMap(f => (f.points || []).map(p => p[0]));
+  const [lo, hi] = niceDomain(Math.min(0, ...all), Math.max(0, ...all), 5);
+  const x = v => m.l + (v - lo) / ((hi - lo) || 1) * (w - m.l - m.r);
+  const rows = feats.map((f, r) => {
+    const cy = m.t + rowH * r + rowH / 2;
+    const pts = f.points || [];
+    // Beeswarm: spread each point vertically according to how crowded its x position is
+    const xs = pts.map(p => x(p[0]));
+    const counts = new Map();
+    xs.forEach(px => { const b = Math.round(px / 3); counts.set(b, (counts.get(b) || 0) + 1); });
+    const maxOff = rowH / 2 - 3;
+    const dots = pts.map((p, i) => {
+      const crowd = counts.get(Math.round(xs[i] / 3)) || 1;
+      const spread = Math.min(maxOff, 1.6 * Math.sqrt(crowd - 1) + (crowd > 1 ? 1.5 : 0));
+      const jitter = (((i * 2654435761) >>> 0) % 1000) / 1000 * 2 - 1;  // deterministic in [-1, 1]
+      const off = spread * jitter;
+      const frac = f.levels ? (p[1] == null ? null : p[1] / Math.max(1, f.levels.length - 1)) : (f.numeric ? p[1] : null);
+      const tip = `<strong>${esc(f.name)} = ${esc(p[2] == null ? "∅" : p[2])}</strong><br>SHAP ${p[0] >= 0 ? "+" : ""}${fmt(p[0], 3)}`;
+      return `<circle class="sv sv-${shapStep(frac)}" r="3" cx="${xs[i].toFixed(1)}" cy="${(cy + off).toFixed(1)}" data-tip="${esc(tip)}"/>`;
+    }).join("");
+    return `<text class="tick shap-name" x="${m.l - 10}" y="${cy + 4}" text-anchor="end">${esc(f.name.length > 20 ? f.name.slice(0, 19) + "…" : f.name)}<title>${esc(f.name)}</title></text>
+      <line class="grid" x1="${m.l}" x2="${w - m.r}" y1="${cy}" y2="${cy}"/>${dots}`;
+  }).join("");
+  const ticks = niceTicks(lo, hi, 5).map(v => `<text class="tick" x="${x(v)}" y="${h - m.b + 16}" text-anchor="middle">${fmt(v, 2)}</text>`).join("");
+  const cls = s.explained_class;
+  const leftLabel = s.task === "regression" ? t("shapAxisLowReg") : t("shapAxisLow", { cls });
+  const rightLabel = s.task === "regression" ? t("shapAxisHighReg") : t("shapAxisHigh", { cls });
+  const sentences = feats.slice(0, 5).map(f => `<li>${esc(shapSentence(f, s))}</li>`).join("");
+  return `<h4>${t("shapTitle")}</h4>
+    <p class="muted">${t("shapRead")}</p>
+    <div class="shap-legend"><span>${t("shapValueLow")}</span>${[0, 1, 2, 3, 4].map(i => `<i class="sv-key sv-${i}"></i>`).join("")}<span>${t("shapValueHigh")}</span><i class="sv-key sv-na"></i><span>${t("shapNoValue")}</span></div>
+    <div class="viz-scroll"><svg class="viz shap-viz" viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(t("shapTitle"))}"
+         onmousemove="const c=event.target.closest('circle'); chartTip(event, c ? c.dataset.tip : '')" onmouseleave="chartTip(event, '')">
+      ${rows}
+      <line class="ref" x1="${x(0)}" x2="${x(0)}" y1="${m.t}" y2="${h - m.b}"/>
+      <line class="axis" x1="${m.l}" x2="${w - m.r}" y1="${h - m.b}" y2="${h - m.b}"/>
+      ${ticks}
+      <text class="axis-label" x="${x(0) - 8}" y="${h - 8}" text-anchor="end">← ${esc(leftLabel)}</text>
+      <text class="axis-label" x="${x(0) + 8}" y="${h - 8}" text-anchor="start">${esc(rightLabel)} →</text>
+    </svg></div>
+    <h4 class="shap-summary-title">${t("shapInWords")}</h4>
+    <ul class="shap-sentences">${sentences}</ul>
+    <p class="muted small expert-only">${t("shapExpert", { model: s.explained_model || "—", n: fmt(s.n, 0) })}</p>`;
 }
 
 function renderImportance(importance) {
-  const entries = Object.entries(importance).sort((a, b) => b[1] - a[1]).slice(0, 15);
+  const all = Object.entries(importance).sort((a, b) => b[1] - a[1]);
+  const entries = all.slice(0, 12);
   const max = Math.max(...entries.map(([, v]) => Math.abs(v))) || 1;
   const rows = entries.map(([name, v]) => `
     <div class="imp-row"><span class="imp-name" title="${esc(name)}">${esc(name)}</span>
-      <div class="imp-bar"><span class="${v < 0 ? "neg" : ""}" style="width:${(Math.abs(v) / max * 100).toFixed(1)}%"></span></div>
-      <span class="imp-val num">${fmt(v, 4)}</span></div>`).join("");
-  return `<div class="card"><p class="muted">${t("importanceIntro")}</p><div class="imp-list">${rows}</div></div>`;
+      <div class="imp-bar"><span class="${v <= 0 ? "neg" : ""}" style="width:${Math.max(1, Math.abs(v) / max * 100).toFixed(1)}%"></span></div>
+      <span class="imp-val num">${fmt(v, 3)}</span></div>`).join("");
+  const useless = all.filter(([, v]) => v <= 0).length;
+  return `<div class="card"><h4>${t("importanceTitle")}</h4><p class="muted">${t("importanceIntro")}</p><div class="imp-list">${rows}</div>
+    ${useless ? `<p class="muted small">${t("importanceUseless", { n: useless })}</p>` : ""}</div>`;
 }
 
 function renderLeaderboard(rows, best) {
@@ -1270,7 +1469,7 @@ function renderLeaderboard(rows, best) {
       <td class="num"><div class="score-cell"><div class="meter meter-primary"><span style="width:${typeof r.score_val === "number" ? (15 + 85 * (r.score_val - min) / span).toFixed(1) : 0}%"></span></div>${typeof r.score_val === "number" ? fmt(r.score_val, 4) : "—"}</div></td>
       <td class="num">${typeof r.fit_time === "number" ? `${fmt(r.fit_time, 1)} s` : "—"}</td>
       <td class="num">${typeof r.pred_time_val === "number" ? `${fmt(r.pred_time_val, 2)} s` : "—"}</td></tr>`).join("");
-  return `<div class="card table-wrap"><table class="table">
+  return `<h4>${t("tabModels")}</h4><div class="table-wrap"><table class="table">
     <thead><tr><th>${t("model")}</th><th class="num">${t("scoreVal")}</th><th class="num">${t("fitTime")}</th><th class="num">${t("predictTime")}</th></tr></thead>
     <tbody>${body}</tbody></table></div>`;
 }
@@ -1280,16 +1479,18 @@ async function generateShapPlot() {
     showAlert(t("missingSHAPInfo"), "error");
     return;
   }
+  if (shapSummary || shapPlot) { showResultsSection("shap"); return; }
   const requestId = uid();
   currentShapRequestId = requestId;
   const button = $("generate-shap-button");
   const spinner = $("training-spinner-shap");
-  button.disabled = true;
-  spinner.hidden = false;
+  if (button) button.disabled = true;
+  if (spinner) spinner.hidden = false;
   const formData = new FormData();
   formData.append("training_id", trainingId || "");
   formData.append("model_path", lastTrainedModelPath || "");
   formData.append("target_column", lastUsedTargetColumn);
+  formData.append("lang", currentLang());
   formData.append("dataset", lastCleanedCsvBlob, "cleaned_data.csv");
   try {
     const response = await fetch("/generate_shap_plot", { method: "POST", body: formData });
@@ -1305,17 +1506,20 @@ async function generateShapPlot() {
           clearInterval(interval);
           if (data.error) { reject(new Error(data.error)); return; }
           shapPlot = data.result.shap_summary_plot;
-          $("shap-plots").innerHTML = `<img src="data:image/png;base64,${shapPlot}" alt="shap_summary">`;
-          button.hidden = true;
+          shapSummary = data.result.shap_summary || null;
+          const box = $("res-shap");
+          if (box) box.innerHTML = renderShapBlock();
           resolve();
         } catch (e) { clearInterval(interval); reject(e); }
       }, 700);
     });
   } catch (err) {
-    showAlert(`${t("shapGenerationError")}: ${err.message}`, "error");
-    button.disabled = false;
+    showAlert(`${t("shapGenerationError")}: ${t(err.message) !== err.message ? t(err.message) : err.message}`, "error");
+    const b = $("generate-shap-button");
+    if (b) b.disabled = false;
   } finally {
-    spinner.hidden = true;
+    const sp = $("training-spinner-shap");
+    if (sp) sp.hidden = true;
   }
 }
 
@@ -1357,6 +1561,7 @@ async function downloadPDF() {
       stats: dataSetStats.map(({ hist, ...rest }) => rest),
     };
     if (shapPlot) payload.shap_plot = shapPlot;
+    if (shapSummary) payload.shap_sentences = shapSummary.features.slice(0, 5).map(f => shapSentence(f, shapSummary));
     const response = await fetch("/download_pdf", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
     });
@@ -1444,12 +1649,6 @@ async function runPrediction() {
   $("predict-btn").disabled = true;
   $("predict-spinner").hidden = false;
   try {
-    await loadScript(CDN.jszip);
-    const zip = await JSZip.loadAsync(model);
-    pngResultTrainingForPrediction = [];
-    zip.forEach((path, entry) => {
-      if (path.startsWith("plot_train_results/") && path.endsWith(".png")) pngResultTrainingForPrediction.push(entry);
-    });
     const formData = new FormData();
     formData.append("dataset", dataset);
     formData.append("zip_model", model);
@@ -1458,6 +1657,7 @@ async function runPrediction() {
     if (data.error) { showAlert(t(data.error), "error"); return; }
     if (!data.preview?.length) { showAlert(t("noPrediction"), "warning"); return; }
     PlotsPredictionResults = data.plots;
+    lastPredictionSummary = data.summary || null;
     renderPredictionResults(data);
   } catch (_) {
     showAlert(t("predictionError"), "error");
@@ -1596,33 +1796,25 @@ async function sendChat(preset) {
 
   try {
     const payload = { message, lang: currentLang(), app_state: appState(), history: chatHistory.slice(-12) };
-    if (typeof STUDY !== "undefined" && STUDY && STUDY.sessionId) payload.study_session_id = STUDY.sessionId;
     const groqKey = getGroqKey();
     if (groqKey) payload.groq_api_key = groqKey;
     if (appMode === 1) {
+      if (dataSetStats) payload.stats = dataSetStats.map(({ hist, ...rest }) => rest);
       if (lastResult) {
-        payload.summary = {
-          text: summaryResults.summary, feature_importance_plot: summaryResults.feature_importance_plot,
-          metrics_plot: summaryResults.metrics_plot, forecast_plot: summaryResults.forecast_plot,
+        const baseline = ["binary", "multiclass"].includes(lastResult.task_type) ? majorityShare(lastUsedTargetColumn) : null;
+        payload.result = {
+          task_type: lastResult.task_type, target: lastUsedTargetColumn, best_model: lastResult.best_model,
+          train_time: lastResult.train_time, majority_share: baseline,
+          evaluation: lastTrainConfig && lastTrainConfig.cv === false ? `holdout ${lastTrainConfig.valPct}%` : "out-of-fold (cross-validation)",
+          metrics: Object.fromEntries(metricEntries(lastResult).map(([k, m]) => [k, m.value])),
+          leaderboard: (lastResult.leaderboard || []).slice(0, 10).map(r => ({ model: r.model, score_val: r.score_val })),
         };
-        if (shapPlot) payload.shap_summary_plot = shapPlot;
         if (lastResult.feature_importance) payload.feature_importance = lastResult.feature_importance;
         if (lastResult.plot_data) payload.plot_data = lastResult.plot_data;
-        payload.model_metadata = {
-          task_type: summaryResults.task_type, best_model: summaryResults.best_model,
-          target_column: lastUsedTargetColumn || null, prediction_length: summaryResults.prediction_length || null,
-        };
+        if (shapSummary) payload.shap_summary = shapSummary;
       }
-      if (dataSetStats) payload.stats = dataSetStats.map(({ hist, top, ...rest }) => rest);
-      if (dataSetPreview) payload.markdown_preview = dataSetPreview;
-      else if (datasetRows) payload.markdown_preview = datasetRows.slice(0, 6).map(r => r.join(" | ")).join("\n");
-      if (dataPreprocessing) payload.data_preprocessing = dataPreprocessing;
-    } else {
-      if (PlotsPredictionResults) payload.plots_prediction_results = PlotsPredictionResults;
-      if (pngResultTrainingForPrediction?.length) {
-        const entries = await Promise.all(pngResultTrainingForPrediction.map(async e => [e.name.split("/").pop(), await e.async("base64")]));
-        payload.png_result_training_for_prediction = Object.fromEntries(entries);
-      }
+    } else if (lastPredictionSummary) {
+      payload.prediction_summary = lastPredictionSummary;
     }
     const response = await fetch("/chat", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
@@ -1684,20 +1876,21 @@ function renderMarkdown(text) {
 // ── Assistant actions ────────────────────────────────────────────────────────
 // The assistant only proposes; nothing changes until the user clicks "Apply".
 const chatHistory = [];
-const RESULT_TABS = { performance: "perf", importance: "importance", shap: "shap", models: "models" };
 
 function appState() {
   const state = {
     mode: appMode === 1 ? "train" : "predict",
     step: ["", "data", "train", "results"][wizardCurrentStep] || "data",
-    actions_enabled: !(typeof STUDY !== "undefined" && STUDY),
+    actions_enabled: true,
     dataset: null,
     // Labels exactly as the user sees them, so the assistant names buttons correctly
     ui_labels: {
       steps: [t("stepData"), t("stepTrain"), t("stepResults")],
       continue_button: t("continue"), train_button: t("startTraining"), stop_button: t("stopTraining"),
       advanced_options: t("advancedOptions"), metric_field: t("evalMetric"), time_field: t("timeTitle"),
-      variables_table: t("variablesTitle"), use_column: t("use"), results_tabs: [t("tabPerformance"), t("tabImportance"), t("tabShap"), t("tabModels")],
+      variables_table: t("variablesTitle"), use_column: t("use"), results_sections: [t("secPerformance"), t("secVariables"), t("shapTitle"), t("secDetails")],
+      results_buttons: [t("predictWithModel"), t("generateShap"), t("askButton")],
+      settings: [t("language"), t("darkMode"), t("expertMode")],
       downloads: [t("downloadModel"), t("downloadPDF"), t("downloadPlots")], modes: [t("tabTrain"), t("tabPredict")],
     },
   };
@@ -1725,8 +1918,8 @@ function appState() {
       task_type: lastResult.task_type,
       metrics: Object.fromEntries(metricEntries(lastResult).map(([k, m]) => [k, +m.value.toFixed(4)])),
       top_importance: Object.fromEntries(importance.map(([k, v]) => [k, +v.toFixed(4)])),
-      tabs: Array.from(document.querySelectorAll("#training-results .tab")).map(b =>
-        Object.keys(RESULT_TABS).find(k => RESULT_TABS[k] === b.dataset.tab)).filter(Boolean),
+      tabs: ["performance", "importance", "shap", "models"].filter(k => $({ performance: "res-performance", importance: "res-importance", shap: "res-shap", models: "res-models" }[k])),
+      shap_computed: !!(shapSummary || shapPlot),
     };
   }
   return state;
@@ -1743,7 +1936,7 @@ function describeAction({ name, args }) {
     set_cross_validation: () => t(args.enabled ? "act_cv_on" : "act_cv_off"),
     start_training: () => t("act_train"),
     go_to_step: () => t("act_step", { step: t({ data: "stepData", train: "stepTrain", results: "stepResults" }[args.step]) }),
-    show_results_tab: () => t("act_tab", { tab: t({ performance: "tabPerformance", importance: "tabImportance", shap: "tabShap", models: "tabModels" }[args.tab]) }),
+    show_results_tab: () => t("act_tab", { tab: t({ performance: "secPerformance", importance: "secVariables", shap: "shapTitle", models: "secDetails" }[args.tab]) }),
     generate_shap: () => t("act_shap"),
     switch_mode: () => t(args.mode === "predict" ? "act_mode_predict" : "act_mode_train"),
   }[name];
@@ -1795,8 +1988,8 @@ const ACTIONS = {
   },
   start_training: () => { setWizardStep(STEP.TRAIN); startTraining(); },
   go_to_step: ({ step }) => setWizardStep({ data: STEP.DATA, train: STEP.TRAIN, results: STEP.RESULTS }[step]),
-  show_results_tab: ({ tab }) => { setWizardStep(STEP.RESULTS); setResultsTab(RESULT_TABS[tab]); },
-  generate_shap: () => { setWizardStep(STEP.RESULTS); setResultsTab("shap"); generateShapPlot(); },
+  show_results_tab: ({ tab }) => showResultsSection(tab),
+  generate_shap: () => { showResultsSection("shap"); generateShapPlot(); },
   switch_mode: ({ mode }) => setMode(mode),
 };
 

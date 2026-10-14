@@ -355,7 +355,12 @@ def build_report(data, lang="en"):
     if data.get("shap_plot"):
         img = _image(data["shap_plot"], width, 120 * mm)
         if img is not None:
-            story.append(KeepTogether([_p(T["shap"], S["h2"]), img]))
+            block = [_p(T["shap"], S["h2"]), img]
+            sentences = [str(x) for x in (data.get("shap_sentences") or []) if x][:6]
+            if sentences:
+                block.append(Spacer(1, 4))
+                block += [_p("• " + x, S["body"]) for x in sentences]
+            story.append(KeepTogether(block))
 
     # Leaderboard
     leaderboard = [r for r in (data.get("leaderboard") or []) if isinstance(r, dict) and r.get("model")]

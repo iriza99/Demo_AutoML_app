@@ -1,11 +1,10 @@
 from groq import Groq
 from utils.assistant_tools import (NO_TOOLS_INSTRUCTIONS, TOOL_INSTRUCTIONS, build_tools,
                                    extract_text_actions, parse_tool_calls)
-from utils.plots import plot_data_as_text
+from utils.plots import plot_data_as_text, shap_summary_as_text
 from utils.prompts import get_system_prompt_chat
 import os
 import logging
-import base64
 import re
 import json
 
@@ -23,26 +22,8 @@ def groq_model():
     return os.getenv('GROQ_MODEL', DEFAULT_GROQ_MODEL)
 
 
-def groq_supports_images():
-    """Only send plot images when GROQ_VISION=1 names a vision-capable model."""
-    return os.getenv('GROQ_VISION', '0').strip().lower() in ('1', 'true', 'yes')
-
-
-def _text_only(messages):
-    """Drop image parts for text-only models, keeping any accompanying text."""
-    out = []
-    for m in messages:
-        content = m.get('content')
-        if isinstance(content, list):
-            continue  # image messages only carry a caption about the image itself
-        out.append(m)
-    return out
-
-
 def _groq_request(api_key, messages, max_tokens, temperature, tools=None):
     model = groq_model()
-    if not groq_supports_images():
-        messages = _text_only(messages)
     kwargs = {}
     if model.startswith('openai/gpt-oss'):
         # Reasoning tokens count towards the completion budget; keep them short.
@@ -129,14 +110,6 @@ def handle_chat_request(data, extra_system='', allow_actions=True):
         raise ValueError("groqMissing")
 
     lang = data.get('lang', 'en')
-    summary = data.get('summary')
-    model_metadata = data.get('model_metadata') or {}
-    dataset = data.get('markdown_preview')
-    stats = data.get('stats')
-    shap_plot = data.get('shap_summary_plot')
-    plot_predictions = data.get('plots_prediction_results')
-    training_pred_plot = data.get('png_result_training_for_prediction')
-    # Start with a system prompt for the chat
     messages = [{"role": "system", "content": get_system_prompt_chat(lang)}]
     if extra_system:
         messages.append({"role": "system", "content": extra_system})
@@ -147,72 +120,16 @@ def handle_chat_request(data, extra_system='', allow_actions=True):
         messages.append({"role": "system", "content":
                          "Current state of the app the user is looking at (JSON). If no dataset is loaded, "
                          "tell the user to upload one first.\n" + _state_summary(app_state)})
-    if use_tools:
-        messages.append({"role": "system", "content": TOOL_INSTRUCTIONS})
+    messages.append({"role": "system", "content": TOOL_INSTRUCTIONS if use_tools else NO_TOOLS_INSTRUCTIONS})
 
-    # Append dataset preview, stats, training summary if available
-    append_if_exists(messages, "Aperçu du dataset fourni :", dataset)
-    append_if_exists(messages, "Statistiques du dataset :", stats)
-    if summary:
-        append_if_exists(messages, "Résumé des résultats d'entraînement :", summary.get('text'))
-        # Add metrics values as text
-        metrics_plot = summary.get("metrics_plot", {})
-        if metrics_plot:
-            metric_lines = []
-            for k, v in metrics_plot.items():
-                try:
-                    val = v.get("value")
-                    if val is not None:
-                        metric_lines.append(f"{k.upper()}: {val:.4f}")
-                except Exception:
-                    continue
-            if metric_lines:
-                append_if_exists(messages, "Métriques:", "\n".join(metric_lines))
-        # Add model metadata text
-        meta_lines = []
-        if model_metadata.get("task_type"):
-            meta_lines.append(f"Tâche: {model_metadata['task_type']}")
-        if model_metadata.get("best_model"):
-            meta_lines.append(f"Meilleur modèle: {model_metadata['best_model']}")
-        if model_metadata.get("target_column"):
-            meta_lines.append(f"Colonne cible: {model_metadata['target_column']}")
-        if model_metadata.get("prediction_length"):
-            meta_lines.append(f"Longueur de prédiction: {model_metadata['prediction_length']}")
-        if meta_lines:
-            append_if_exists(messages, "Métadonnées du modèle:", "\n".join(meta_lines))
-
-    plot_text = plot_data_as_text(data.get('plot_data'))
-    if plot_text:
-        append_if_exists(messages, "Exact data behind the result plots (use these numbers when explaining the plots):", plot_text)
-    if not groq_supports_images():
-        messages.append({"role": "system", "content":
-                         "You cannot see the plot images. Describe plots only from the numbers given above; "
-                         "never invent values. If the data for a plot is not provided, say so and explain "
-                         "in general terms how to read it."})
-
-    importance = data.get('feature_importance') or {}
-    if importance:
-        lines = [f"{name}: {value:.4f}" for name, value in
-                 sorted(importance.items(), key=lambda kv: kv[1], reverse=True)[:15]]
-        append_if_exists(messages, "Variable importance (permutation, higher = more important):", "\n".join(lines))
-
-    # Add metric plots from summary if present
-    if summary:
-        add_metric_plots_from_summary(messages, summary)
-
-    # Add SHAP plot if present
-    if shap_plot:
-        add_image_message(messages, "Voici le graphe SHAP de l'entraînement.", shap_plot)
-
-    # Add prediction result plots if present
-    if plot_predictions:
-        for name, plot in plot_predictions.items():
-            add_image_message(messages, f"Voici un des graphes {name} des résultats de prédiction.", plot)
-
-    # Add training prediction plots if present
-    if training_pred_plot:
-        for name, plot in training_pred_plot.items():
-            add_image_message(messages, f"Voici un des graphes {name} qui montre les résultats de l'entrainement du modèle qui sert à faire les prédictions.", plot)
+    context = results_context(data)
+    if context:
+        messages.append({"role": "system", "content": context})
+    messages.append({"role": "system", "content":
+                     "You cannot see images. Explain plots only from the numbers in this context and never "
+                     "invent values. If the data for something is not in the context, say so and explain how "
+                     "to obtain it in the app (for example, the SHAP plot is computed with its button in the "
+                     "results)."})
 
     # Earlier turns, then the user's new message
     messages.extend(_history(data))
@@ -227,37 +144,62 @@ def handle_chat_request(data, extra_system='', allow_actions=True):
         text, actions = extract_text_actions(text, app_state)
     return {"response": text, "actions": actions}
 
-def append_if_exists(messages, title, content):
-    # Append a message to the conversation if content is not empty
-    if content:
-        messages.append({"role": "user", "content": f"{title}\n{content}"})
 
-def add_image_message(messages, caption, base64_str):
-    # Add an image (base64-encoded) with a caption to the conversation
+def _num(value, digits=4):
     try:
-        if not base64_str:
-            return
-        # Validate base64 to avoid Groq 400 invalid image data
-        base64.b64decode(base64_str, validate=True)
-    except Exception:
-        logging.exception("Invalid base64 image, skipping.")
-        return
+        return f"{float(value):.{digits}g}"
+    except (TypeError, ValueError):
+        return str(value)
 
-    messages.append({"role": "user", "content": [
-        {"type": "text", "text": caption},
-        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_str}"}}
-    ]})
 
-def add_metric_plots_from_summary(messages, summary):
-    # Add feature importance plot and metric plots from the summary to the conversation
-    if "feature_importance_plot" in summary:
-        add_image_message(messages, "Voici le graphe de l'importance des variables.", summary["feature_importance_plot"])
-    if "forecast_plot" in summary and summary["forecast_plot"]:
-        add_image_message(messages, "Prévision vs valeurs réelles", summary["forecast_plot"])
-    for metric_name, metric_obj in summary.get("metrics_plot", {}).items():
-        for plot_type in ['plot', 'plot_hist']:
-            if plot_type in metric_obj:
-                base64_plot = metric_obj[plot_type]
-                if base64_plot:
-                    add_image_message(messages, f"Voici le graphe {metric_name} ({plot_type}).", base64_plot)
+def results_context(data):
+    """Everything the user can see in the app, as plain text for a text-only model."""
+    parts = []
+    stats = data.get('stats')
+    if isinstance(stats, list) and stats:
+        lines = []
+        for s in stats[:200]:
+            if not isinstance(s, dict):
+                continue
+            line = f"- {s.get('name')} ({s.get('type')}): missing {s.get('missing')}, distinct {s.get('unique')}"
+            if s.get('mean') is not None:
+                line += f", mean {_num(s.get('mean'))}, sd {_num(s.get('std'))}, range {_num(s.get('min'))}–{_num(s.get('max'))}"
+            elif s.get('top'):
+                line += ", most frequent: " + ", ".join(f"{v} ({n})" for v, n in s['top'][:4])
+            lines.append(line)
+        parts.append("DATASET VARIABLES:\n" + "\n".join(lines))
 
+    result = data.get('result') if isinstance(data.get('result'), dict) else None
+    if result:
+        lines = [f"Task: {result.get('task_type')}", f"Target: {result.get('target')}",
+                 f"Best model: {result.get('best_model')}", f"Training time: {_num(result.get('train_time'), 3)} s",
+                 f"Evaluation: {result.get('evaluation') or 'out-of-fold (cross-validation)'}"]
+        for name, value in (result.get('metrics') or {}).items():
+            lines.append(f"Metric {name}: {_num(value)}")
+        if result.get('majority_share') is not None:
+            lines.append(f"Accuracy of always predicting the most frequent class: {_num(result['majority_share'], 3)}")
+        board = result.get('leaderboard') or []
+        if board:
+            lines.append("Models tried (validation score, higher is better): " + ", ".join(
+                f"{r.get('model')} {_num(r.get('score_val'))}" for r in board[:10] if isinstance(r, dict)))
+        parts.append("TRAINING RESULTS:\n" + "\n".join(lines))
+
+    plot_text = plot_data_as_text(data.get('plot_data'))
+    if plot_text:
+        parts.append("PERFORMANCE PLOTS (exact numbers shown in the app):\n" + plot_text)
+
+    importance = data.get('feature_importance') or {}
+    if importance:
+        lines = [f"{name}: {_num(value)}" for name, value in
+                 sorted(importance.items(), key=lambda kv: kv[1], reverse=True)[:20]]
+        parts.append("VARIABLE IMPORTANCE (permutation: drop in score when the variable is shuffled; "
+                     "near 0 or negative = not useful):\n" + "\n".join(lines))
+
+    shap_text = shap_summary_as_text(data.get('shap_summary'))
+    if shap_text:
+        parts.append("SHAP PLOT (already computed and visible to the user):\n" + shap_text)
+
+    prediction = data.get('prediction_summary')
+    if isinstance(prediction, dict) and prediction:
+        parts.append("PREDICTIONS ON NEW DATA (visible to the user):\n" + json.dumps(prediction, ensure_ascii=False)[:3000])
+    return "\n\n".join(parts)

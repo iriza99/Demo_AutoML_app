@@ -14,12 +14,10 @@
     } catch (_) { document.documentElement.dataset.theme = "light"; }
   </script>
   <link rel="stylesheet" href="/static/style.css">
-  <link rel="stylesheet" href="/static/study.css">
   <script defer src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
   <script defer src="/static/lang.js"></script>
   <script defer src="/static/app.js"></script>
-  <script defer src="/static/study.js"></script>
 </head>
 
 <body>
@@ -62,6 +60,13 @@
           <label class="switch-row">
             <span data-i18n="darkMode">Dark mode</span>
             <input type="checkbox" id="theme-toggle" class="switch" onchange="toggleDarkMode()">
+          </label>
+          <label class="switch-row">
+            <span>
+              <span data-i18n="expertMode">Expert mode</span>
+              <small class="muted" data-i18n="expertModeHint">Show technical details by default</small>
+            </span>
+            <input type="checkbox" id="expert-toggle" class="switch" onchange="toggleExpertMode()">
           </label>
           <button class="btn btn-ghost btn-sm" type="button" onclick="showGroqModal()" data-i18n="changeApiKey">Change assistant API key</button>
         </div>
@@ -184,7 +189,7 @@
             <details class="card advanced" id="advanced-options-section">
               <summary>
                 <span data-i18n="advancedOptions">Advanced options</span>
-                <span class="muted" data-i18n="optional">optional</span>
+                <span class="muted" data-i18n="advancedHint">optional · metric, models, validation, missing values</span>
               </summary>
               <div class="advanced-body">
                 <div class="field">

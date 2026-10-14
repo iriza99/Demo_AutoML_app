@@ -13,8 +13,6 @@ from logging.handlers import RotatingFileHandler
 import threading
 import atexit
 from cleanup import cleanup_old_files
-from study_routes import study_bp
-from utils.study import store as study_store
 from utils.training_progress import TrainingProgress
 from apscheduler.schedulers.background import BackgroundScheduler
 import os
@@ -79,7 +77,6 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
-app.register_blueprint(study_bp)
 
 # Set up background scheduler for periodic cleanup
 scheduler = BackgroundScheduler()
@@ -312,12 +309,13 @@ def shap_plot():
         if not target_column:
             raise UserError("error_missing_target_column")
 
+        lang = request.form.get('lang', 'en')
         shap_id = uuid.uuid4().hex[:12]
         _shap_tasks[shap_id] = {'progress': 0, 'done': False, 'result': None, 'error': None}
 
         def _worker():
             try:
-                result = generate_shap_plot(model_path, df, target_column)
+                result = generate_shap_plot(model_path, df, target_column, lang=lang)
                 _shap_tasks[shap_id].update({'progress': 100, 'done': True, 'result': result})
                 logger.info("SHAP plot generated successfully.")
             except Exception as exc:
@@ -395,7 +393,8 @@ def predict():
         return jsonify({
             "preview": predictions[:5],
             "download_url": f"/download_prediction/{pred_filename}",
-            "plots": plots
+            "plots": plots,
+            "summary": result.get('summary'),
         })
 
     except UserError as ue:
@@ -424,11 +423,7 @@ def assistant_status():
 def chat():
     try:
         data = request.get_json()
-        # In the adaptive study condition, condition the assistant on the inferred profile
-        study_session = study_store.get(data.get('study_session_id') or '')
-        extra_system = study_session.chat_instruction() if study_session else ''
-        # In the user study the assistant must not act on the app: it would solve the traps
-        result = handle_chat_request(data, extra_system=extra_system, allow_actions=study_session is None)
+        result = handle_chat_request(data)
         return jsonify(result)
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400

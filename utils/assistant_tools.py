@@ -260,9 +260,11 @@ You can PROPOSE actions in the app by calling the provided tools. Rules:
 - Always write a short answer in the user's language alongside any proposal.
 - Never write actions as JSON or code in your answer: use the tools.
 - When you mention buttons or sections, use the labels in ui_labels of the app state.
+- Never mention tool or function names (such as generate_shap) to the user; describe the action in plain words.
 """.strip()
 
 NO_TOOLS_INSTRUCTIONS = """
 Actions cannot be proposed right now. Tell the user in words which button or option to use,
-with the labels in ui_labels of the app state. Never write JSON or code describing actions.
+with the labels in ui_labels of the app state. Never write JSON or code describing actions,
+and never mention internal tool or function names.
 """.strip()

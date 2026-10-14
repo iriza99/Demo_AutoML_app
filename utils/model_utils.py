@@ -1,4 +1,4 @@
-﻿from autogluon.tabular import TabularPredictor, TabularDataset
+﻿from autogluon.tabular import TabularPredictor
 from autogluon.timeseries import TimeSeriesDataFrame, TimeSeriesPredictor
 import os
 import io
@@ -6,12 +6,10 @@ import pandas as pd
 import matplotlib
 import matplotlib.patches as mpatches
 import logging
-import traceback
 
 matplotlib.use('Agg')
 
 import matplotlib.pyplot as plt
-import seaborn as sns
 import base64
 import numpy as np
 import shap
@@ -22,7 +20,7 @@ from utils import plots
 
 from sklearn.metrics import (
     accuracy_score, f1_score, roc_auc_score,
-    mean_squared_error, r2_score, roc_curve, confusion_matrix, ConfusionMatrixDisplay
+    mean_squared_error, r2_score, roc_curve, confusion_matrix
 )
 
 # Load a dataset from a file path or file-like object into a DataFrame.
@@ -723,7 +721,11 @@ def _tree_shap_runner(predictor, X, max_candidates=3):
 
             def prepare(frame, name=name, child=child):
                 inputs = trainer.get_inputs_to_model(model=name, X=predictor.transform_features(frame))
-                return child.preprocess(inputs)
+                out = child.preprocess(inputs)
+                # Some models (e.g. XGBoost) return a bare array: keep the column names when they still line up
+                if not isinstance(out, pd.DataFrame) and getattr(out, 'ndim', 0) == 2 and out.shape[1] == inputs.shape[1]:
+                    out = pd.DataFrame(out, columns=list(inputs.columns), index=inputs.index)
+                return out
 
             explainer = shap.TreeExplainer(raw)
             explainer(prepare(X.iloc[:5]))  # smoke test
@@ -786,8 +788,9 @@ class _CategoryCodec:
 
 
 # Generate SHAP summary plot for model explanations
-def generate_shap_plot(model_path, df, target_column):
+def generate_shap_plot(model_path, df, target_column, lang='en'):
     try:
+        plots.use_language(lang)
         predictor = TabularPredictor.load(model_path)
 
         if target_column not in df.columns:
@@ -801,10 +804,22 @@ def generate_shap_plot(model_path, df, target_column):
 
         # Tree explanations are cheap, so they can cover many more patients
         n_rows = 500 if runner.prepare else 40
-        shap_values, features = runner(X.sample(n=min(n_rows, len(X)), random_state=0))
-        shap_summary_plot = shap_plot_to_base64(shap.summary_plot, shap_values, features)
+        sample = X.sample(n=min(n_rows, len(X)), random_state=0)
+        shap_values, features = runner(sample)
+        summary = None
+        try:
+            summary = plots.shap_summary_data(shap_values, features, sample, predictor, runner.label)
+        except Exception:
+            logging.exception("Could not summarise SHAP values")
+        try:
+            shap_summary_plot = plots.shap_beeswarm_figure(summary) if summary else None
+        except Exception:
+            logging.exception("Could not draw SHAP figure in the app style")
+            shap_summary_plot = None
+        if shap_summary_plot is None:
+            shap_summary_plot = shap_plot_to_base64(shap.summary_plot, shap_values, features)
 
-        return {'shap_summary_plot': shap_summary_plot}
+        return {'shap_summary_plot': shap_summary_plot, 'shap_summary': summary}
 
     except UserError:
         raise
@@ -827,6 +842,28 @@ def plot_predicted_class_distribution(y_pred):
 # Plot predicted probability distributions for each class
 def plot_prediction_confidence(y_proba_df):
     return plots.class_probability_figure(y_proba_df)
+
+def _prediction_summary(predictor, predictions, df):
+    """Numbers behind the prediction view, for the assistant."""
+    summary = {'records': int(len(predictions)), 'task': predictor.problem_type, 'target': str(predictor.label)}
+    try:
+        if predictor.problem_type in ('binary', 'multiclass'):
+            counts = predictions.astype(str).value_counts()
+            summary['predicted_classes'] = {k: int(v) for k, v in counts.items()}
+            proba = predictor.predict_proba(df)
+            confidence = proba.max(axis=1)
+            summary['confidence'] = {
+                'mean': round(float(confidence.mean()), 3),
+                'share_below_0.6': round(float((confidence < 0.6).mean()), 3),
+            }
+        else:
+            values = pd.to_numeric(predictions, errors='coerce')
+            summary['predicted_values'] = {k: round(float(v), 4) for k, v in
+                                           values.describe(percentiles=[0.05, 0.5, 0.95]).items()}
+    except Exception:
+        logging.exception("Could not summarise predictions")
+    return summary
+
 
 # Predict using a trained model and generate relevant plots
 def predict_model(csv_path, model_path, lang='en'):
@@ -854,7 +891,8 @@ def predict_model(csv_path, model_path, lang='en'):
         task_type = predictor.problem_type
         output_data = {
             'predictions': predictions.reset_index().to_dict(orient='records'),
-            'plots': {}
+            'plots': {},
+            'summary': _prediction_summary(predictor, predictions, df),
         }
 
         # Generate plots based on task type

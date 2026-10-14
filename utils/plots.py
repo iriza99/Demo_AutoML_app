@@ -59,6 +59,7 @@ _LANG = contextvars.ContextVar("plot_lang", default="en")
 
 LABELS = {
     "en": {
+        "shap_title": "How each variable pushes the prediction", "shap_x": "Effect on the prediction (SHAP value)", "shap_low": "low", "shap_high": "high", "shap_value": "Variable value",
         "cm_title": "Confusion matrix", "actual": "Actual", "predicted": "Predicted",
         "roc_title": "ROC curve", "tpr": "Sensitivity (true positive rate)", "fpr": "1 − specificity (false positive rate)",
         "chance": "Chance", "model": "Model",
@@ -72,6 +73,7 @@ LABELS = {
         "confidence_title": "Predicted probability by class", "probability": "Predicted probability",
     },
     "es": {
+        "shap_title": "Cómo empuja cada variable la predicción", "shap_x": "Efecto en la predicción (valor SHAP)", "shap_low": "bajo", "shap_high": "alto", "shap_value": "Valor de la variable",
         "cm_title": "Matriz de confusión", "actual": "Real", "predicted": "Predicho",
         "roc_title": "Curva ROC", "tpr": "Sensibilidad (tasa de verdaderos positivos)", "fpr": "1 − especificidad (tasa de falsos positivos)",
         "chance": "Azar", "model": "Modelo",
@@ -85,6 +87,7 @@ LABELS = {
         "confidence_title": "Probabilidad predicha por clase", "probability": "Probabilidad predicha",
     },
     "fr": {
+        "shap_title": "Comment chaque variable pousse la prédiction", "shap_x": "Effet sur la prédiction (valeur SHAP)", "shap_low": "bas", "shap_high": "élevé", "shap_value": "Valeur de la variable",
         "cm_title": "Matrice de confusion", "actual": "Réel", "predicted": "Prédit",
         "roc_title": "Courbe ROC", "tpr": "Sensibilité (taux de vrais positifs)", "fpr": "1 − spécificité (taux de faux positifs)",
         "chance": "Hasard", "model": "Modèle",
@@ -352,4 +355,180 @@ def plot_data_as_text(plot_data):
         lines.append(f"Regression errors (sample of {len(err)} of {plot_data.get('n')} records): "
                      f"mean error {err.mean():.4g}, median absolute error {np.median(np.abs(err)):.4g}, "
                      f"5th-95th percentile of error {np.percentile(err, 5):.4g} to {np.percentile(err, 95):.4g}.")
+    return "\n".join(lines)
+
+
+
+# ── SHAP ──────────────────────────────────────────────────────────────────────
+LOW_COLOR, MID_COLOR, HIGH_COLOR = SERIES[0], "#b8bfcc", SERIES[1]  # diverging: low value → high value
+
+
+def _spearman(a, b):
+    import pandas as pd
+    mask = np.isfinite(a) & np.isfinite(b)
+    if mask.sum() < 5 or np.std(a[mask]) == 0 or np.std(b[mask]) == 0:
+        return None
+    return float(pd.Series(a[mask]).rank().corr(pd.Series(b[mask]).rank()))
+
+
+def shap_summary_data(explanation, features, raw, predictor=None, explained_model="", top=12, max_points=250, seed=0):
+    """Compact SHAP summary: per variable, mean |SHAP|, direction and a sample of points.
+
+    Drawn natively by the app, used for the PDF and given to the assistant as text.
+    """
+    import pandas as pd
+    values = np.asarray(explanation.values, dtype=float)
+    names = list(getattr(explanation, "feature_names", None) or [])
+    if len(names) != values.shape[1]:
+        names = list(features.columns) if isinstance(features, pd.DataFrame) else [str(i) for i in range(values.shape[1])]
+    if isinstance(features, pd.DataFrame):
+        feat_df = features.reset_index(drop=True)
+    else:
+        data = getattr(explanation, "data", None)
+        data = np.asarray(features if data is None or np.ndim(data) != 2 else data)
+        feat_df = pd.DataFrame(data.reshape(len(values), -1)[:, :values.shape[1]], columns=names)
+    raw = raw.reset_index(drop=True)
+    mean_abs = np.abs(values).mean(axis=0)
+    order = [j for j in np.argsort(-mean_abs) if np.isfinite(mean_abs[j])][:top]
+    rows = np.arange(len(values))
+    if len(rows) > max_points:
+        rows = np.sort(np.random.default_rng(seed).choice(rows, max_points, replace=False))
+
+    out = []
+    for j in order:
+        name = str(names[j])
+        col = raw[name] if name in raw.columns else feat_df.iloc[:, j]
+        effect = values[:, j]
+        numeric = pd.api.types.is_numeric_dtype(col) and col.nunique(dropna=True) > 2
+        item = {"name": name, "mean_abs": round(float(mean_abs[j]), 6), "numeric": bool(numeric)}
+        if numeric:
+            v = pd.to_numeric(col, errors="coerce").to_numpy(dtype=float)
+            finite = v[np.isfinite(v)]
+            lo, hi = (np.percentile(finite, 5), np.percentile(finite, 95)) if finite.size else (0.0, 1.0)
+            span = (hi - lo) or 1.0
+            item["direction"] = _spearman(v, effect)
+            item["points"] = [[round(float(effect[i]), 5),
+                               None if not np.isfinite(v[i]) else round(float(np.clip((v[i] - lo) / span, 0, 1)), 3),
+                               None if not np.isfinite(v[i]) else float(f"{v[i]:.4g}")] for i in rows]
+        else:
+            labels = col.astype(str).where(col.notna(), "∅").to_numpy()
+            groups = pd.DataFrame({"c": labels, "e": effect}).groupby("c")["e"].agg(["mean", "size"])
+            groups = groups.reindex(groups["mean"].abs().sort_values(ascending=False).index)[:6]
+            item["categories"] = [{"value": str(k), "mean": round(float(r["mean"]), 5), "n": int(r["size"])}
+                                  for k, r in groups.iterrows()]
+            if col.nunique(dropna=True) == 2:
+                # Binary variable: colour by which of the two values (sorted) the record has
+                cats = sorted(col.dropna().astype(str).unique())
+                item["levels"] = cats
+                item["points"] = [[round(float(effect[i]), 5),
+                                   None if labels[i] == "∅" else float(cats.index(labels[i])), labels[i]] for i in rows]
+                codes = np.array([np.nan if l == "∅" else cats.index(l) for l in labels], dtype=float)
+                item["direction"] = _spearman(codes, effect)
+            else:
+                item["points"] = [[round(float(effect[i]), 5), None, labels[i]] for i in rows]
+                item["direction"] = None
+        out.append(item)
+
+    task = getattr(predictor, "problem_type", None)
+    labels = list(getattr(predictor, "class_labels", None) or [])
+    base = getattr(explanation, "base_values", None)
+    base = float(np.mean(base)) if base is not None and np.size(base) else None
+    return {
+        "task": task,
+        "explained_class": str(labels[-1]) if task in ("binary", "multiclass") and labels else None,
+        "explained_model": explained_model,
+        "n": int(len(values)),
+        "base_value": base,
+        "features": out,
+    }
+
+
+def _mix(c1, c2, f):
+    a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(x + (y - x) * f):02x}" for x, y in zip(a, b))
+
+
+def shap_color(fraction):
+    if fraction is None:
+        return MID_COLOR
+    return _mix(LOW_COLOR, MID_COLOR, fraction * 2) if fraction < 0.5 else _mix(MID_COLOR, HIGH_COLOR, (fraction - 0.5) * 2)
+
+
+def beeswarm_offsets(xs, width=None, bins=120, max_offset=0.38):
+    """Vertical offsets that spread points more where they are crowded (same rule as the app)."""
+    xs = np.asarray(xs, dtype=float)
+    lo, hi = float(xs.min()), float(xs.max())
+    idx = np.round((xs - lo) / ((hi - lo) or 1) * (bins - 1)).astype(int)
+    crowd = np.bincount(idx, minlength=bins)[idx]
+    spread = np.minimum(max_offset, 0.045 * np.sqrt(crowd - 1) + np.where(crowd > 1, 0.04, 0))
+    jitter = (((np.arange(len(xs)) * 2654435761) % 2**32) % 1000) / 1000 * 2 - 1
+    return spread * jitter
+
+
+def shap_beeswarm_figure(summary, save_path=None):
+    feats = summary.get("features") or []
+    if not feats:
+        return None
+    fig, ax = plt.subplots(figsize=(7.2, 0.46 * len(feats) + 1.6))
+    ax.grid(axis="y", visible=False)
+    for row, item in enumerate(feats):
+        y0 = len(feats) - 1 - row
+        pts = item.get("points") or []
+        if not pts:
+            continue
+        xs = np.array([p[0] for p in pts], dtype=float)
+        offs = beeswarm_offsets(xs, 1)
+        cols = []
+        for p in pts:
+            f = p[1]
+            if f is not None and item.get("levels"):
+                f = f / max(1, len(item["levels"]) - 1)
+            cols.append(shap_color(f) if item.get("numeric") or item.get("levels") else MID_COLOR)
+        ax.scatter(xs, y0 + offs, s=12, c=cols, linewidths=0.4, edgecolors=SURFACE, zorder=3)
+    ax.axvline(0, color=MUTED, linewidth=1, zorder=2)
+    ax.set_yticks(range(len(feats)), [f["name"] for f in feats][::-1])
+    ax.tick_params(axis="y", length=0, labelsize=10, labelcolor=INK)
+    ax.set_xlabel(L("shap_x"))
+    ax.set_title(L("shap_title"))
+    # Colour key
+    from matplotlib.colors import LinearSegmentedColormap
+    from matplotlib.cm import ScalarMappable
+    cmap = LinearSegmentedColormap.from_list("lowhigh", [LOW_COLOR, MID_COLOR, HIGH_COLOR])
+    bar = fig.colorbar(ScalarMappable(cmap=cmap), ax=ax, fraction=0.03, pad=0.02, ticks=[0, 1])
+    bar.ax.set_yticklabels([L("shap_low"), L("shap_high")])
+    bar.outline.set_visible(False)
+    bar.ax.tick_params(length=0, labelsize=9, colors=MUTED)
+    bar.set_label(L("shap_value"), color=MUTED, fontsize=9)
+    return to_base64(fig, save_path)
+
+
+def shap_summary_as_text(summary):
+    """Plain-text SHAP summary for the assistant."""
+    if not summary or not summary.get("features"):
+        return ""
+    task, cls = summary.get("task"), summary.get("explained_class")
+    if task == "binary":
+        target = f"Positive SHAP values push the prediction towards class '{cls}' (higher probability of '{cls}')."
+    elif task == "multiclass":
+        target = f"Values explain the output for class '{cls}' only."
+    else:
+        target = "Positive SHAP values raise the predicted value."
+    lines = [f"SHAP summary computed on {summary.get('n')} records, explaining model {summary.get('explained_model') or 'the best model'}. {target}",
+             "Variables ordered by mean |SHAP| (overall influence):"]
+    for f in summary["features"]:
+        line = f"- {f['name']}: mean |SHAP| {f['mean_abs']:.4g}"
+        d = f.get("direction")
+        if d is not None and abs(d) >= 0.3:
+            if f.get("levels"):
+                hi = f["levels"][-1]
+                line += f"; records with value '{hi}' have {'higher' if d > 0 else 'lower'} SHAP (rank correlation {d:.2f})"
+            else:
+                line += f"; higher values of the variable {'increase' if d > 0 else 'decrease'} the output (rank correlation {d:.2f})"
+        elif d is not None:
+            line += f"; no clear monotonic direction (rank correlation {d:.2f})"
+        cats = f.get("categories")
+        if cats and not f.get("levels"):
+            line += "; mean SHAP by category: " + ", ".join(f"{c['value']} {c['mean']:+.3g} (n={c['n']})" for c in cats)
+        lines.append(line)
     return "\n".join(lines)

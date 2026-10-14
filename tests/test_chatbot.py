@@ -30,29 +30,28 @@ def fake_groq(monkeypatch):
 PLOT = "iVBORw0KGgo="  # valid base64
 
 
-def test_default_model_is_not_the_retired_one_and_images_are_dropped():
-    data = {"message": "¿Es bueno mi modelo?", "groq_api_key": "k", "lang": "es",
-            "summary": {"text": "AUC 0.9", "metrics_plot": {"roc_auc": {"value": 0.9, "plot": PLOT}}},
-            "feature_importance": {"a": 0.2, "b": 0.5}}
+SHAP = {"task": "binary", "explained_class": "malignant", "explained_model": "LightGBM_BAG_L1", "n": 3,
+        "features": [{"name": "Bare_Nuclei", "mean_abs": 0.9, "numeric": True, "direction": 0.85,
+                      "points": [[1.2, 1.0, 10], [-0.4, 0.0, 1], [0.1, 0.5, 5]]},
+                     {"name": "sex", "mean_abs": 0.1, "numeric": False, "direction": None,
+                      "categories": [{"value": "F", "mean": 0.05, "n": 2}], "points": [[0.1, None, "F"]]}]}
+
+
+def test_context_is_text_with_results_and_shap():
+    data = {"message": "¿Qué dice el gráfico SHAP?", "groq_api_key": "k", "lang": "es",
+            "result": {"task_type": "binary", "target": "Class", "metrics": {"roc_auc": 0.98}, "majority_share": 0.68},
+            "plot_data": {"labels": ["benign", "malignant"], "confusion": [[300, 5], [4, 160]]},
+            "feature_importance": {"a": 0.2, "b": 0.5}, "shap_summary": SHAP}
     assert chatbot.handle_chat_request(data) == {"response": "ok", "actions": []}
     call = FakeGroq.calls[-1]
     assert call["model"] == "openai/gpt-oss-120b"
     assert call["extra_body"] == {"reasoning_effort": "low"}
     assert all(isinstance(m["content"], str) for m in call["messages"])
     text = "\n".join(m["content"] for m in call["messages"])
-    assert "b: 0.5000" in text and text.index("b: 0.5000") < text.index("a: 0.2000")
-
-
-def test_vision_model_keeps_images(monkeypatch):
-    monkeypatch.setenv("GROQ_MODEL", "some/vision-model")
-    monkeypatch.setenv("GROQ_VISION", "1")
-    data = {"message": "hola", "groq_api_key": "k",
-            "summary": {"metrics_plot": {"roc_auc": {"value": 0.9, "plot": PLOT}}}}
-    chatbot.handle_chat_request(data)
-    call = FakeGroq.calls[-1]
-    assert call["model"] == "some/vision-model"
-    assert "extra_body" not in call
-    assert any(isinstance(m["content"], list) for m in call["messages"])
+    assert "b: 0.5" in text and text.index("b: 0.5") < text.index("a: 0.2")
+    assert "benign | 300 | 5" in text and "roc_auc: 0.98" in text
+    assert "SHAP PLOT" in text and "Bare_Nuclei" in text and "higher values of the variable increase" in text
+    assert "towards class 'malignant'" in text
 
 
 def test_missing_key_is_reported(monkeypatch):

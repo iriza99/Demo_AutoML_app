@@ -9,16 +9,13 @@ A user-friendly web interface to train, evaluate, and deploy machine learning mo
 - **Automated model training** — classification, regression, and time series forecasting
 - **No-code, three-step interface** — *Data* (upload and review every variable) → *Train* (pick the target, time and optional settings) → *Results* (metrics, plots, downloads)
 - **Honest evaluation** — out-of-fold metrics with optional holdout split
-- **Explainability** — variable importance and SHAP beeswarm plots (TreeExplainer on the best tree model, about a second)
-- **LLM assistant** — answers questions about your data and results in plain language, remembers the conversation and can *propose* actions (exclude variables, change the target, metric or time, start training, open a results tab). Each proposal appears as a card and only runs when you click *Apply*; actions are disabled in study mode
+- **Results in plain language** — a one-line verdict, all metrics together, automatic checks (identifier-like or dominant variables, class imbalance) with one-click fixes, and interactive charts (confusion matrix, ROC, predicted vs actual)
+- **Explainability** — variable importance and an interactive SHAP plot with a summary in words (TreeExplainer on the best tree model, about a second)
+- **Expert mode** (settings) — technical details, configuration and every model tried, open by default
+- **LLM assistant** — answers questions about your data and results in plain language using the exact numbers behind every chart (including SHAP and predictions), remembers the conversation and can *propose* actions (exclude variables, change the target, metric or time, start training, open a results section). Each proposal appears as a card and only runs when you click *Apply*
+- **PDF report** — built from the app's own data, in the interface language, no assistant key needed
 - **Dark mode** and multilingual UI (English, French, Spanish)
 - **Download** trained models, plots, a PDF report and predictions; predict straight away with the model you just trained
-
----
-
-## User study mode
-
-The `study/` folder contains a controlled user study on **competence-aware adaptive guidance**: planted-trap clinical datasets, a study mode (`?study=1`) with telemetry, an implicit two-dimensional (ML × clinical domain) competence model, generic pitfall detectors and a local Jev-style typed decision layer. See [`study/README.md`](study/README.md) and [`study/TRAPS.md`](study/TRAPS.md).
 
 ---
 
@@ -42,10 +39,13 @@ The `study/` folder contains a controlled user study on **competence-aware adapt
 │   ├── lang.js              # i18n strings
 │   ├── app.js               # Frontend logic
 │   ├── style.css            # Design tokens, components, dark mode
-│   ├── study.js / study.css # User-study mode (only with ?study=1)
 │
 └── utils/
-    ├── model_utils.py       # Training, evaluation, SHAP, plots
+    ├── model_utils.py       # Training, evaluation, SHAP
+    ├── plots.py             # Figures in the app style and the data behind them
+    ├── report.py            # PDF report
+    ├── training_progress.py # Live training progress and GPU detection
+    ├── assistant_tools.py   # Actions the assistant can propose
     ├── chatbot_utils.py     # LLM integration (Groq)
     └── prompts.py           # Prompt templates
 ```
@@ -88,8 +88,7 @@ Optional settings (all can go in `.env`):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GROQ_MODEL` | `openai/gpt-oss-120b` | Groq model for the assistant and the PDF report. Change it when Groq retires a model. |
-| `GROQ_VISION` | `0` | Set to `1` only if `GROQ_MODEL` accepts images; the assistant then also sees the plots. |
+| `GROQ_MODEL` | `openai/gpt-oss-120b` | Groq model for the assistant. Change it when Groq retires a model. |
 | `AUTOML_GPU` | `auto` | `auto` trains XGBoost, CatBoost and the neural networks on the GPU when PyTorch sees one; `0` forces CPU. |
 | `AUTOML_PARALLEL_FOLDS` | `0` | `1` fits cross-validation folds in parallel with Ray. Faster, but in a long-running server later trainings can lose most models to Ray "Broken pipe" errors. |
 | `MAX_UPLOAD_MB` | `500` | Maximum upload size (trained model ZIPs are usually 10–50 MB). |

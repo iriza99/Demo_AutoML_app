@@ -43,3 +43,27 @@ def test_regression_and_minimal_reports():
     # Whatever is missing, a report is still produced
     build_report({}, lang="en")
     build_report({"metrics": {"rmse": float("nan")}, "stats": [{"name": None}], "leaderboard": "x"}, lang="en")
+
+
+def test_shap_summary_from_array_features():
+    import numpy as np
+    import pandas as pd
+    from utils import plots
+
+    rng = np.random.default_rng(0)
+    raw = pd.DataFrame({"age": rng.integers(20, 90, 80), "sex": rng.choice(["F", "M"], 80),
+                        "ward": rng.choice(["a", "b", "c"], 80)})
+    values = np.column_stack([(raw["age"] - 55) / 30, np.where(raw["sex"] == "M", 0.2, -0.2), rng.normal(0, 0.01, 80)])
+    explanation = type("E", (), {"values": values, "feature_names": None, "data": None, "base_values": np.zeros(80)})
+    predictor = type("P", (), {"problem_type": "binary", "class_labels": ["no", "yes"]})
+    features = raw.assign(sex=(raw["sex"] == "M").astype(int), ward=raw["ward"].map({"a": 0, "b": 1, "c": 2})).to_numpy()
+    s = plots.shap_summary_data(explanation, features, raw, predictor, "XGBoost")
+    # Without names the columns are positional; with a DataFrame they keep their names
+    s = plots.shap_summary_data(explanation, raw.assign(sex=0), raw, predictor, "XGBoost")
+    names = [f["name"] for f in s["features"]]
+    assert names[0] == "age" and s["features"][0]["direction"] > 0.9 and s["explained_class"] == "yes"
+    sex = next(f for f in s["features"] if f["name"] == "sex")
+    assert sex["levels"] == ["F", "M"] and sex["direction"] > 0.9
+    text = plots.shap_summary_as_text(s)
+    assert "higher values of the variable increase" in text and "'M' have higher SHAP" in text
+    assert plots.shap_beeswarm_figure(s)

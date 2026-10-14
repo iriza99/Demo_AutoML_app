@@ -17,6 +17,4 @@ logs/
 *.pyc
 *.pyo
 *.swp
-# Study telemetry (participant data, never commit)
-study_logs/
 .pytest_cache/
