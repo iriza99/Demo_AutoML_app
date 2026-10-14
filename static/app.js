@@ -1435,8 +1435,7 @@ async function sendChat(preset) {
     }
     const actions = Array.isArray(data.actions) ? data.actions : [];
     const text = data.response || (actions.length ? t("actionsIntro") : "");
-    // Model output is escaped before Markdown rendering: it may quote dataset values
-    if (text) addChatMessage("ai", typeof marked !== "undefined" ? marked.parse(esc(text)) : esc(text));
+    if (text) addChatMessage("ai", renderMarkdown(text));
     if (actions.length) renderActionCards(actions);
     chatHistory.push({ role: "user", content: message });
     chatHistory.push({ role: "assistant", content: text + (actions.length ? `\n[${t("actionsProposedNote")}: ${actions.map(describeAction).join("; ")}]` : "") });
@@ -1450,6 +1449,32 @@ async function sendChat(preset) {
   }
 }
 
+// Markdown from the model, with anything executable removed (it may quote dataset values)
+const SAFE_TAGS = new Set(["P", "BR", "STRONG", "B", "EM", "I", "CODE", "PRE", "UL", "OL", "LI", "BLOCKQUOTE",
+  "H1", "H2", "H3", "H4", "H5", "H6", "TABLE", "THEAD", "TBODY", "TR", "TH", "TD", "A", "HR", "DEL", "SPAN"]);
+
+function renderMarkdown(text) {
+  if (typeof marked === "undefined") return esc(text).replace(/\n/g, "<br>");
+  const tpl = document.createElement("template");
+  tpl.innerHTML = marked.parse(text);
+  const walk = (node) => {
+    Array.from(node.children).forEach((child) => {
+      if (!SAFE_TAGS.has(child.tagName)) {
+        child.replaceWith(document.createTextNode(child.textContent));
+        return;
+      }
+      Array.from(child.attributes).forEach((attr) => {
+        const keep = child.tagName === "A" && attr.name === "href" && /^https?:/i.test(attr.value);
+        if (!keep) child.removeAttribute(attr.name);
+      });
+      if (child.tagName === "A") { child.target = "_blank"; child.rel = "noopener"; }
+      walk(child);
+    });
+  };
+  walk(tpl.content);
+  return tpl.innerHTML;
+}
+
 // ── Assistant actions ────────────────────────────────────────────────────────
 // The assistant only proposes; nothing changes until the user clicks "Apply".
 const chatHistory = [];
@@ -1461,6 +1486,14 @@ function appState() {
     step: ["", "data", "train", "results"][wizardCurrentStep] || "data",
     actions_enabled: !(typeof STUDY !== "undefined" && STUDY),
     dataset: null,
+    // Labels exactly as the user sees them, so the assistant names buttons correctly
+    ui_labels: {
+      steps: [t("stepData"), t("stepTrain"), t("stepResults")],
+      continue_button: t("continue"), train_button: t("startTraining"), stop_button: t("stopTraining"),
+      advanced_options: t("advancedOptions"), metric_field: t("evalMetric"), time_field: t("timeTitle"),
+      variables_table: t("variablesTitle"), use_column: t("use"), results_tabs: [t("tabPerformance"), t("tabImportance"), t("tabShap"), t("tabModels")],
+      downloads: [t("downloadModel"), t("downloadPDF"), t("downloadPlots")], modes: [t("tabTrain"), t("tabPredict")],
+    },
   };
   if (datasetLoaded) {
     const target = $("target-column").value;

@@ -92,3 +92,33 @@ def test_no_tools_when_actions_are_not_allowed():
     assert out["actions"] == [] and "tools" not in FakeGroq.calls[-1]
     out = chatbot.handle_chat_request(dict(data, app_state=dict(STATE, actions_enabled=False)))
     assert out["actions"] == []
+
+
+def test_tool_failure_retries_then_answers_without_action_instructions(monkeypatch):
+    attempts = []
+
+    class FailingTools(FakeGroq):
+        def create(self, **kwargs):
+            if kwargs.get("tools"):
+                attempts.append(1)
+                raise RuntimeError("Error code: 400 - tool_use_failed")
+            return super().create(**kwargs)
+
+    monkeypatch.setattr(chatbot, "Groq", FailingTools)
+    out = chatbot.handle_chat_request({"message": "iniciar", "groq_api_key": "k", "app_state": STATE})
+    assert len(attempts) == 2 and out["actions"] == []
+    contents = [m["content"] for m in FakeGroq.calls[-1]["messages"]]
+    assert chatbot.TOOL_INSTRUCTIONS not in contents
+    assert chatbot.NO_TOOLS_INSTRUCTIONS in contents
+
+
+def test_json_action_in_text_becomes_a_card():
+    class JsonText(FakeGroq):
+        def create(self, **kwargs):
+            FakeGroq.calls.append(kwargs)
+            msg = type("M", (), {"content": 'Pulsa **Entrenar modelo**.\n```json\n{"type": "start_training"}\n```', "tool_calls": None})
+            return type("R", (), {"choices": [type("C", (), {"message": msg})]})
+
+    chatbot.Groq = JsonText
+    out = chatbot.handle_chat_request({"message": "iniciar", "groq_api_key": "k", "app_state": STATE})
+    assert out == {"response": "Pulsa **Entrenar modelo**.", "actions": [{"name": "start_training", "args": {}}]}

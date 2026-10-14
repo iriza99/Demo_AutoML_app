@@ -1,5 +1,6 @@
 from groq import Groq
-from utils.assistant_tools import TOOL_INSTRUCTIONS, build_tools, parse_tool_calls
+from utils.assistant_tools import (NO_TOOLS_INSTRUCTIONS, TOOL_INSTRUCTIONS, build_tools,
+                                   extract_text_actions, parse_tool_calls)
 from utils.prompts import get_system_prompt_chat, get_system_prompt_preprocessing, get_system_prompt_explanation_plot
 import os
 import logging
@@ -77,17 +78,22 @@ def groq_complete(api_key, messages, max_tokens=1024, temperature=0.7):
     return _groq_request(api_key, messages, max_tokens, temperature).content or ''
 
 
-def groq_chat_with_tools(api_key, messages, tools, max_tokens=1024, temperature=0.5):
-    """Completion that may return tool calls; falls back to plain text if tool use fails."""
-    try:
-        message = _groq_request(api_key, messages, max_tokens, temperature, tools=tools)
-        return message.content or '', getattr(message, 'tool_calls', None) or []
-    except Exception as exc:
-        # Groq answers 400 "tool_use_failed" when the model writes a malformed call
-        if 'tool' not in str(exc).lower():
-            raise
-        logging.warning(f"Tool use failed, answering without actions: {exc}")
-        return groq_complete(api_key, messages, max_tokens, temperature), []
+def groq_chat_with_tools(api_key, messages, tools, max_tokens=1024, temperature=0.3, attempts=2):
+    """Completion that may return tool calls; falls back to plain text if tool use keeps failing."""
+    for attempt in range(attempts):
+        try:
+            message = _groq_request(api_key, messages, max_tokens, temperature, tools=tools)
+            return message.content or '', getattr(message, 'tool_calls', None) or []
+        except Exception as exc:
+            # Groq answers 400 "tool_use_failed" when the model writes a malformed call
+            if 'tool' not in str(exc).lower():
+                raise
+            logging.warning(f"Tool use failed (attempt {attempt + 1}/{attempts}): {exc}")
+    # Answer in words: swap the tool instructions for "explain which button to press"
+    plain = [m for m in messages if m.get('content') != TOOL_INSTRUCTIONS]
+    insert_at = max(i for i, m in enumerate(plain) if m['role'] == 'system') + 1
+    plain.insert(insert_at, {"role": "system", "content": NO_TOOLS_INSTRUCTIONS})
+    return groq_complete(api_key, plain, max_tokens, temperature), []
 
 
 def clean_markdown(text):
@@ -214,7 +220,11 @@ def handle_chat_request(data, extra_system='', allow_actions=True):
     if not use_tools:
         return {"response": groq_complete(groq_key, messages, max_tokens=1024, temperature=0.7), "actions": []}
     text, tool_calls = groq_chat_with_tools(groq_key, messages, build_tools(app_state))
-    return {"response": text, "actions": parse_tool_calls(tool_calls, app_state)}
+    actions = parse_tool_calls(tool_calls, app_state)
+    if not actions:
+        # Some answers describe the action as JSON instead of calling the tool
+        text, actions = extract_text_actions(text, app_state)
+    return {"response": text, "actions": actions}
 
 def append_if_exists(messages, title, content):
     # Append a message to the conversation if content is not empty

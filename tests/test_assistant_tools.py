@@ -52,3 +52,21 @@ def test_parse_drops_unknown_invalid_and_duplicate_calls():
         {"name": "exclude_variables", "args": {"columns": ["record_id"]}},
         {"name": "set_metric", "args": {"metric": "roc_auc"}},
     ]
+
+
+def test_actions_written_as_json_are_rescued():
+    from utils.assistant_tools import extract_text_actions
+    text = ('Para iniciar el entrenamiento con la configuración actual, haz clic en **Entrenar modelo**.\n\n'
+            '**Propuesta de acción**\n\n```json\n{\n  "type": "start_training"\n}\n```')
+    clean, actions = extract_text_actions(text, STATE)
+    assert actions == [{"name": "start_training", "args": {}}]
+    assert "Propuesta" not in clean and "{" not in clean and clean.startswith("Para iniciar")
+
+    text = 'Te sugiero {"name": "exclude_variables", "arguments": {"columns": ["record_id"]}} y {"action": "set_metric", "metric": "roc_auc"}.'
+    clean, actions = extract_text_actions(text, STATE)
+    assert actions == [{"name": "exclude_variables", "args": {"columns": ["record_id"]}},
+                       {"name": "set_metric", "args": {"metric": "roc_auc"}}]
+
+    # Ordinary JSON that is not an action stays untouched
+    text = 'Un registro sería {"age": 70, "sex": "F"}.'
+    assert extract_text_actions(text, STATE) == (text, [])

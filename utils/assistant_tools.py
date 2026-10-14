@@ -8,6 +8,7 @@ exist (real column names, metrics available for the task, ...).
 """
 import json
 import logging
+import re
 
 MAX_ENUM = 300  # above this many columns, names are validated but not enumerated
 
@@ -182,6 +183,74 @@ def parse_tool_calls(tool_calls, state):
     return actions[:6]
 
 
+_NAME_KEYS = ("name", "type", "action", "tool", "function")
+_ARG_KEYS = ("args", "arguments", "parameters", "params")
+_FENCED = re.compile(r"```[a-zA-Z]*\s*(\{.*?\})\s*```", re.DOTALL)
+
+
+def _objects_in(text):
+    """JSON objects written in the text: fenced blocks first, then bare {...} spans."""
+    found = [(m.start(), m.end(), m.group(1)) for m in _FENCED.finditer(text)]
+    taken = [(a, b) for a, b, _ in found]
+    depth, start = 0, None
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+            if depth == 0 and not any(a <= start < b for a, b in taken):
+                found.append((start, i + 1, text[start:i + 1]))
+    return found
+
+
+def extract_text_actions(text, state):
+    """Rescue actions the model wrote as JSON in its answer instead of calling a tool.
+
+    Returns (text without those JSON blocks, validated actions).
+    """
+    if not text or "{" not in text:
+        return text, []
+    offered = {t["function"]["name"] for t in build_tools(state)}
+    actions, spans = [], []
+    for start, end, raw in _objects_in(text):
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        name = next((obj[k] for k in _NAME_KEYS if isinstance(obj.get(k), str) and obj[k] in offered), None)
+        if name is None:
+            continue
+        args = next((obj[k] for k in _ARG_KEYS if isinstance(obj.get(k), dict)), None)
+        if args is None:
+            args = {k: v for k, v in obj.items() if k not in _NAME_KEYS}
+        clean = validate_call(name, args, state)
+        if clean is not None:
+            actions.append({"name": name, "args": clean})
+        spans.append((start, end))
+    if not spans:
+        return text, []
+    # Cut the JSON (and a short heading right before it, e.g. "**Proposed action**")
+    out, last = [], 0
+    for start, end in sorted(spans):
+        chunk = text[last:start]
+        lines = chunk.rstrip().split("\n")
+        if len(lines) > 1 and len(lines[-1]) < 60 and re.match(r"^\s*(#+|\*\*|__)", lines[-1]):
+            chunk = "\n".join(lines[:-1])
+        out.append(chunk)
+        last = end
+    out.append(text[last:])
+    cleaned = re.sub(r"\n{3,}", "\n\n", "".join(out)).strip()
+    unique = []
+    for a in actions:
+        if a not in unique:
+            unique.append(a)
+    return cleaned, unique[:6]
+
+
 TOOL_INSTRUCTIONS = """
 You can PROPOSE actions in the app by calling the provided tools. Rules:
 - Calling a tool does not change anything: the user sees each proposal as a card and decides whether to apply it. Never say that you already did something.
@@ -189,4 +258,11 @@ You can PROPOSE actions in the app by calling the provided tools. Rules:
 - Do not propose start_training unless the user asks to train or agrees to it.
 - Use the exact column names from the app state. If you are unsure, ask instead of proposing.
 - Always write a short answer in the user's language alongside any proposal.
+- Never write actions as JSON or code in your answer: use the tools.
+- When you mention buttons or sections, use the labels in ui_labels of the app state.
+""".strip()
+
+NO_TOOLS_INSTRUCTIONS = """
+Actions cannot be proposed right now. Tell the user in words which button or option to use,
+with the labels in ui_labels of the app state. Never write JSON or code describing actions.
 """.strip()
