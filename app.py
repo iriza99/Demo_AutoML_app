@@ -1,6 +1,6 @@
 ﻿from flask import Flask, request, render_template, jsonify, send_file
 from utils.model_utils import load_dataframe, train_model, predict_model, generate_shap_plot, UserError
-from utils.chatbot_utils import handle_chat_request, build_preprocessing_summary, generate_pdf
+from utils.chatbot_utils import handle_chat_request, build_preprocessing_summary, generate_pdf, server_groq_key
 from datetime import datetime
 import shutil
 import zipfile
@@ -422,6 +422,11 @@ def download_prediction(filename):
         return "File not found", 404
     logger.info(f"Prediction download: {filename}")
     return send_file(filepath, as_attachment=True)
+
+@app.route('/assistant_status')
+def assistant_status():
+    # Only reports whether a key exists, never the key itself
+    return jsonify({"server_key": bool(server_groq_key())})
 
 @app.route('/chat', methods=['POST'])   
 def chat():

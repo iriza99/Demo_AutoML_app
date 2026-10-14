@@ -366,8 +366,8 @@ function instrumentApp() {
     }
     return orig.apply(this, arguments);
   });
-  wrapGlobal("toggleChatSidebar", orig => function () {
-    const result = orig.apply(this, arguments);
+  wrapGlobal("toggleChatSidebar", orig => async function () {
+    const result = await orig.apply(this, arguments);
     studyLog("chat_toggle", { open: !document.getElementById("chat-sidebar").classList.contains("collapsed") });
     return result;
   });

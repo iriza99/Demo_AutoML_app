@@ -14,8 +14,9 @@ import io
 import base64
 import re
 
-# Retrieve the GROQ API key from environment variables by default
-GROQ_API_KEY = os.getenv('GROQ_API_KEY')
+def server_groq_key():
+    """Groq key from the environment (.env is loaded by app.py after this import)."""
+    return os.getenv('GROQ_API_KEY')
 
 def clean_markdown(text):
     # Remove markdown bold and italic markers from text
@@ -31,7 +32,7 @@ def handle_chat_request(data, extra_system=''):
         raise ValueError("error_empty_message")
 
     # Allow overriding the API key via payload, fallback to env
-    groq_key = data.get('groq_api_key') or GROQ_API_KEY
+    groq_key = data.get('groq_api_key') or server_groq_key()
     if not groq_key:
         raise ValueError("groqMissing")
 
@@ -159,7 +160,7 @@ def build_preprocessing_summary(preprocessing_summary: dict, lang='en', groq_api
     Generates a natural language summary of the preprocessing steps using the Groq API.
     If no API key is available, returns a basic text summary of the preprocessing dict.
     """
-    key = groq_api_key or GROQ_API_KEY
+    key = groq_api_key or server_groq_key()
     if not key:
         return f"Preprocessing steps: {preprocessing_summary}"
 
@@ -194,7 +195,7 @@ def generate_explanation_plot(plot = None, name = None, value = None, groq_api_k
     """
     Generates an explanation for a given plot and metric value using the Groq API.
     """
-    key = groq_api_key or GROQ_API_KEY
+    key = groq_api_key or server_groq_key()
     if not key:
         return f"Plot {name} (value={value})"
     messages = [{"role": "system", "content": get_system_prompt_explanation_plot()}]

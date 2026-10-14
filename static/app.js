@@ -90,9 +90,11 @@ function currentLang() {
   try { return localStorage.getItem("selectedLanguage") || "es"; } catch (_) { return "es"; }
 }
 
-function t(key) {
+function t(key, params) {
   const lang = currentLang();
-  return (translations[lang] && translations[lang][key]) || (translations.en && translations.en[key]) || key;
+  let text = (translations[lang] && translations[lang][key]) || (translations.en && translations.en[key]) || key;
+  if (params) Object.entries(params).forEach(([k, v]) => { text = text.replace(`{${k}}`, v); });
+  return text;
 }
 
 function fmt(value, digits = 3) {
@@ -364,6 +366,7 @@ function onDataLoaded(rows) {
   totalDataRows = datasetRows.length - 1;
   datasetLoaded = true;
   invalidateResults();
+  unlockWizardStep(STEP.TRAIN);
 
   buildStats();
   detectTimeColumns();
@@ -377,10 +380,10 @@ function onDataLoaded(rows) {
   renderPreviewRows();
   refreshTargetOptions(true);
   buildImputationControls();
-  $("enable-imputation").checked = false;
+  const imputeToggle = $("enable-imputation");
+  if (imputeToggle) imputeToggle.checked = false;
   $("imputation-controls").hidden = true;
   setDataView("vars");
-  unlockWizardStep(STEP.TRAIN);
   updateStepper();
 }
 
@@ -488,16 +491,19 @@ function onVariableToggle(e) {
   updateTrainSummary();
 }
 
+const PREVIEW_ROWS = 10;
+
 function renderPreviewRows() {
   const header = datasetRows[0];
+  $("rows-caption").textContent = t("rowsCaption", { n: Math.min(PREVIEW_ROWS, totalDataRows), total: fmt(totalDataRows, 0) });
   const head = `<thead><tr>${header.map(h => `<th>${esc(h)}</th>`).join("")}</tr></thead>`;
-  const body = datasetRows.slice(1, 11).map(r => `<tr>${r.map(c => `<td>${esc(c)}</td>`).join("")}</tr>`).join("");
+  const body = datasetRows.slice(1, PREVIEW_ROWS + 1).map(r => `<tr>${r.map(c => `<td>${esc(c)}</td>`).join("")}</tr>`).join("");
   $("preview-table").innerHTML = head + `<tbody>${body}</tbody>`;
 }
 
 function setDataView(view) {
   $("vars-view").hidden = view !== "vars";
-  $("rows-view").hidden = view !== "rows";
+  $("rows-panel").hidden = view !== "rows";
   document.querySelectorAll(".seg-btn").forEach(b => b.classList.toggle("active", b.dataset.view === view));
 }
 
@@ -1340,17 +1346,31 @@ function hideGroqModal() {
   $("groq-modal").classList.add("hidden");
 }
 
-function toggleChatSidebar() {
+let serverHasAssistantKey = null;
+
+async function assistantReady() {
+  if (getGroqKey()) return true;
+  if (serverHasAssistantKey === null) {
+    try {
+      serverHasAssistantKey = (await (await fetch("/assistant_status")).json()).server_key === true;
+    } catch (_) { serverHasAssistantKey = false; }
+  }
+  return serverHasAssistantKey;
+}
+
+async function toggleChatSidebar() {
   const sidebar = $("chat-sidebar");
-  // The server may hold a key in .env; only ask when the server reported it missing
   const opening = sidebar.classList.contains("collapsed");
+  // Ask for a key first when neither the browser nor the server has one
+  if (opening && !(await assistantReady())) { showGroqModal(); return; }
   sidebar.classList.toggle("collapsed", !opening);
   document.body.classList.toggle("chat-open", opening);
   if (opening) { renderChatSuggestions(); setTimeout(() => $("chat-input").focus(), 200); }
 }
 
-function openChatWith(text) {
-  if ($("chat-sidebar").classList.contains("collapsed")) toggleChatSidebar();
+async function openChatWith(text) {
+  if ($("chat-sidebar").classList.contains("collapsed")) await toggleChatSidebar();
+  if ($("chat-sidebar").classList.contains("collapsed")) return;
   $("chat-input").value = text;
   $("chat-input").focus();
 }
@@ -1423,7 +1443,12 @@ async function sendChat(preset) {
     const data = await response.json();
     typing.remove();
     if (!response.ok) {
-      if (data.error === "groqMissing") { showGroqModal(); return; }
+      if (data.error === "groqMissing") {
+        serverHasAssistantKey = false;
+        addChatMessage("ai error", esc(t("groqMissing")));
+        showGroqModal();
+        return;
+      }
       addChatMessage("ai error", esc(t(data.error || "error_chat")));
       return;
     }

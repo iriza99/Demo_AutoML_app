@@ -367,6 +367,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .table-compact td, .table-compact th { padding: 6px 10px; white-space: nowrap; }
 #vars-view { max-height: 560px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
 #rows-view { border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.rows-caption { margin: 0 0 8px; font-size: .88rem; }
+.groq-link { margin: 0; font-size: .9rem; }
+.groq-link a { font-weight: 600; }
 .col-use { width: 56px; text-align: center; }
 .col-use input { width: 18px; height: 18px; accent-color: var(--primary); cursor: pointer; }
 .col-name { white-space: nowrap; }
