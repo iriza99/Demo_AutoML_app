@@ -123,8 +123,7 @@ async function studyFlush(useBeacon = false) {
 }
 
 function currentUiState() {
-  const dropped = Array.from(document.querySelectorAll('#drop-columns-list input[type="checkbox"]:checked'))
-    .map(cb => cb.value);
+  const dropped = typeof getDroppedColumns === "function" ? getDroppedColumns() : [];
   return {
     dropped,
     target: document.getElementById("target-column")?.value || null,
@@ -160,7 +159,7 @@ function renderIntervention(iv, container, onAnswered) {
     const options = el("div", { class: "study-options" });
     iv.probe.options.forEach(opt => {
       options.appendChild(el("button", {
-        class: "neutral-button", type: "button", text: opt.label,
+        class: "btn btn-ghost", type: "button", text: opt.label,
         onclick: async () => {
           options.querySelectorAll("button").forEach(b => (b.disabled = true));
           studyLog("guidance_action", { key: iv.key, mode: iv.mode, action: "answer", answer: opt.key });
@@ -188,7 +187,7 @@ function renderIntervention(iv, container, onAnswered) {
   } else {
     card.appendChild(el("p", { text: iv.text }));
     card.appendChild(el("button", {
-      class: "neutral-button", type: "button", text: st("ok"),
+      class: "btn btn-ghost", type: "button", text: st("ok"),
       onclick: () => {
         studyLog("guidance_action", { key: iv.key, mode: iv.mode, action: "dismiss" });
         card.remove();
@@ -229,15 +228,15 @@ function showBlockingModal(interventions, proceed) {
   box.appendChild(list);
   const actions = el("div", { class: "study-actions" });
   actions.appendChild(el("button", {
-    class: "neutral-button", type: "button", text: st("review"),
+    class: "btn btn-ghost", type: "button", text: st("review"),
     onclick: () => {
       studyLog("train_blocked", { keys: interventions.map(i => i.key) });
       overlay.remove();
-      if (typeof setWizardStep === "function") setWizardStep(2);
+      if (typeof setWizardStep === "function") setWizardStep(1);
     },
   }));
   actions.appendChild(el("button", {
-    class: "primary-action-button", type: "button", text: st("trainAnyway"),
+    class: "btn btn-primary", type: "button", text: st("trainAnyway"),
     onclick: () => {
       studyLog("train_override", { keys: interventions.map(i => i.key) });
       overlay.remove();
@@ -259,7 +258,7 @@ function buildTaskBrief() {
     brief.appendChild(el("div", { class: "study-card-title", text: st("task") }));
     brief.appendChild(el("p", { text: dict.task[lang] }));
     brief.appendChild(el("p", { text: `${st("moment")}: ${dict.prediction_moment[lang]}` }));
-    const table = el("table", { class: "stat-table study-hidden" });
+    const table = el("table", { class: "table study-hidden" });
     table.appendChild(el("tr", {}, [el("th", { text: st("column") }), el("th", { text: st("description") })]));
     Object.entries(dict.columns).forEach(([col, desc]) => {
       table.appendChild(el("tr", {}, [el("td", { text: col }), el("td", { text: desc[lang] || desc.en })]));
@@ -275,7 +274,7 @@ function buildTaskBrief() {
     brief.appendChild(toggle);
     brief.appendChild(table);
   }
-  brief.appendChild(el("button", { class: "primary-action-button study-finish", type: "button", text: st("finish"), onclick: openSubmitModal }));
+  brief.appendChild(el("button", { class: "btn btn-primary study-finish", type: "button", text: st("finish"), onclick: openSubmitModal }));
   const main = document.getElementById("training-section");
   if (main) main.prepend(brief);
 }
@@ -303,9 +302,9 @@ function openSubmitModal() {
   const issues = el("textarea", { rows: "5", class: "study-textarea", placeholder: st("issuesPlaceholder") });
   box.appendChild(issues);
   const actions = el("div", { class: "study-actions" });
-  actions.appendChild(el("button", { class: "neutral-button", type: "button", text: st("cancel"), onclick: () => overlay.remove() }));
+  actions.appendChild(el("button", { class: "btn btn-ghost", type: "button", text: st("cancel"), onclick: () => overlay.remove() }));
   actions.appendChild(el("button", {
-    class: "primary-action-button", type: "button", text: st("submit"),
+    class: "btn btn-primary", type: "button", text: st("submit"),
     onclick: async () => {
       const choice = box.querySelector('input[name="study-deploy"]:checked');
       if (!choice) { showAlert(st("needDeploy"), "warning"); return; }
@@ -343,10 +342,8 @@ function instrumentApp() {
     if (wizardCurrentStep !== before) studyLog("step_view", { step: wizardCurrentStep });
     return result;
   });
-  wrapGlobal("toggleAdvancedOptions", orig => function () {
-    const result = orig.apply(this, arguments);
-    studyLog("advanced_toggle", { open: document.getElementById("advanced-options-body").style.display !== "none" });
-    return result;
+  document.getElementById("advanced-options-section")?.addEventListener("toggle", (e) => {
+    studyLog("advanced_toggle", { open: e.target.open });
   });
   wrapGlobal("generateShapPlot", orig => function () {
     studyLog("shap_request");
@@ -360,8 +357,8 @@ function instrumentApp() {
     studyLog("download", { what: "plots" });
     return orig.apply(this, arguments);
   });
-  wrapGlobal("sendChat", orig => async function () {
-    const text = document.getElementById("chat-input")?.value.trim();
+  wrapGlobal("sendChat", orig => async function (preset) {
+    const text = (typeof preset === "string" ? preset : document.getElementById("chat-input")?.value || "").trim();
     if (text) {
       studyLog("chat_send", { text });
       // The adaptive assistant conditions on the profile, so send this message's evidence first
@@ -412,7 +409,7 @@ function instrumentApp() {
   // Delegated listeners for controls that script.js rebuilds dynamically
   document.addEventListener("change", (e) => {
     const t = e.target;
-    if (t.closest("#drop-columns-list")) studyLog("column_drop_toggle", { column: t.value, dropped: t.checked });
+    if (t.classList.contains("var-include")) studyLog("column_drop_toggle", { column: t.value, dropped: !t.checked });
     else if (t.id === "target-column") studyLog("target_select", { column: t.value });
     else if (t.id === "adv-eval-metric") studyLog("metric_change", { metric: t.value });
     else if (t.id === "adv-use-cv") studyLog("cv_toggle", { use_cv: t.checked });
@@ -436,14 +433,14 @@ function instrumentApp() {
   // Dwell time on rows of the descriptive statistics table
   let rowEnter = null;
   document.addEventListener("mouseover", (e) => {
-    const row = e.target.closest?.("#stats-table tr");
+    const row = e.target.closest?.("#vars-table tbody tr");
     if (row && (!rowEnter || rowEnter.row !== row)) rowEnter = { row, ts: Date.now() };
   });
   document.addEventListener("mouseout", (e) => {
-    if (!rowEnter || e.target.closest?.("#stats-table tr") !== rowEnter.row) return;
+    if (!rowEnter || e.target.closest?.("#vars-table tbody tr") !== rowEnter.row) return;
     if (rowEnter.row.contains(e.relatedTarget)) return;
     const dwell = Date.now() - rowEnter.ts;
-    const column = rowEnter.row.querySelector("td")?.textContent?.trim();
+    const column = rowEnter.row.querySelector(".var-name")?.textContent?.trim();
     if (column && dwell > 800) studyLog("inspect_column", { column, dwell_ms: dwell });
     rowEnter = null;
   });

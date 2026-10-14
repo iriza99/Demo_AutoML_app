@@ -722,64 +722,108 @@ def train_model_timeseries(df, target_column, time_column, time_limit, save_path
 
 # Tree-based model class name keywords that support shap.TreeExplainer
 _TREE_MODEL_KEYWORDS = (
-    'ExtraTrees', 'RandomForest', 'XGBoost', 'XGB',
+    'ExtraTrees', 'RandomForest', 'XGBoost', 'XGB', 'Booster',
     'LightGBM', 'LGBM', 'CatBoost', 'GradientBoosting', 'DecisionTree',
 )
 
-def _unwrap_ag_model(ag_model):
-    """Extract the raw sklearn/xgb/lgb estimator from an AutoGluon model wrapper.
-    Returns None if the structure is not recognised."""
-    try:
-        raw = ag_model
-        # BaggedEnsembleModel stores fold models in .models
-        if hasattr(raw, 'models') and raw.models:
-            raw = raw.models[0]
-        # Most AutoGluon wrappers store the actual estimator in .model
-        if hasattr(raw, 'model'):
-            return raw.model
-        # Return raw itself as a last attempt (may already be an sklearn estimator)
-        return raw
-    except Exception:
-        pass
+
+class _ShapRunner:
+    """Explain a frame and return (shap Explanation, features shown in the plot)."""
+
+    def __init__(self, explainer, prepare=None, codec=None, label=""):
+        self.explainer = explainer
+        self.prepare = prepare
+        self.codec = codec
+        self.label = label
+
+    def __call__(self, X):
+        features = self.prepare(X) if self.prepare else (self.codec.encode(X) if self.codec else X)
+        values = self.explainer(features)
+        if values.values.ndim == 3:
+            # One output per class: show the last class (the positive one for binary tasks)
+            values = values[:, :, -1]
+        return values, features
+
+
+def _tree_shap_runner(predictor, X, max_candidates=3):
+    """TreeExplainer on the best tree-based base model (milliseconds).
+
+    AutoGluon models see transformed features, so the frame goes through the
+    predictor's feature generator, the model's stack inputs and the fold
+    model's own preprocessing before reaching the raw estimator.
+    """
+    trainer = predictor._trainer
+    names = [m for m in predictor.leaderboard(silent=True)['model'] if 'WeightedEnsemble' not in m]
+    for name in names[:max_candidates]:
+        try:
+            model = trainer.load_model(name)
+            child = model.load_child(model.models[0]) if hasattr(model, 'load_child') and getattr(model, 'models', None) else model
+            raw = getattr(child, 'model', None)
+            if raw is None or not any(k in type(raw).__name__ for k in _TREE_MODEL_KEYWORDS):
+                continue
+
+            def prepare(frame, name=name, child=child):
+                inputs = trainer.get_inputs_to_model(model=name, X=predictor.transform_features(frame))
+                return child.preprocess(inputs)
+
+            explainer = shap.TreeExplainer(raw)
+            explainer(prepare(X.iloc[:5]))  # smoke test
+            logging.info(f"SHAP: TreeExplainer on {name} ({type(raw).__name__})")
+            return _ShapRunner(explainer, prepare=prepare, label=name)
+        except Exception as exc:
+            logging.warning(f"TreeExplainer unavailable for {name}: {exc}")
     return None
 
 
 def _build_shap_explainer(predictor, X):
-    """Return the fastest SHAP explainer available for this predictor.
+    """Return the fastest SHAP runner available for this predictor."""
+    runner = _tree_shap_runner(predictor, X)
+    if runner is not None:
+        return runner
 
-    Prefers shap.TreeExplainer (milliseconds) when the best base model is a
-    tree ensemble; falls back to shap.Explainer (PermutationExplainer, slow)
-    otherwise.
-    """
-    trainer = predictor._trainer
+    # Universal fallback — slow but works with any model. SHAP maskers need
+    # numeric input, so non-numeric columns are explained as category codes and
+    # decoded back before calling the predictor.
+    encoder = _CategoryCodec(X)
+    positive = predictor.class_labels[-1] if predictor.problem_type == 'binary' else None
 
-    # Find best non-ensemble model (WeightedEnsemble wraps others, not a tree itself)
-    try:
-        lb = trainer.leaderboard(silent=True)
-        non_ens = lb[~lb['model'].str.contains('WeightedEnsemble', na=False)]
-        best_base_name = non_ens.iloc[0]['model']
-        base_model = trainer.load_model(best_base_name)
-    except Exception:
-        base_model = trainer.load_model(trainer.model_best)
+    def fn(values):
+        frame = encoder.decode(values)
+        if predictor.problem_type == 'binary':
+            return predictor.predict_proba(frame)[positive].to_numpy()
+        if predictor.problem_type == 'multiclass':
+            return predictor.predict_proba(frame).to_numpy()
+        return predictor.predict(frame).to_numpy()
 
-    raw = _unwrap_ag_model(base_model)
-    if raw is not None and any(k in type(raw).__name__ for k in _TREE_MODEL_KEYWORDS):
-        try:
-            explainer = shap.TreeExplainer(raw)
-            explainer(X.iloc[:1])          # quick smoke-test
-            logging.info(f"SHAP: using TreeExplainer with {type(raw).__name__}")
-            return explainer
-        except Exception as exc:
-            logging.warning(f"TreeExplainer failed ({exc}), falling back to PermutationExplainer")
-
-    # Universal fallback — slow but works with any model
-    best_model = trainer.load_model(trainer.model_best)
-    if predictor.problem_type in ('binary', 'multiclass'):
-        fn = best_model.predict_proba
-    else:
-        fn = best_model.predict
     logging.info("SHAP: using PermutationExplainer (generic fallback)")
-    return shap.Explainer(fn, X)
+    explainer = shap.Explainer(fn, encoder.encode(X), feature_names=list(X.columns))
+    return _ShapRunner(explainer, codec=encoder, label="permutation")
+
+
+class _CategoryCodec:
+    """Map non-numeric columns to integer codes (and back) for SHAP."""
+
+    def __init__(self, X):
+        self.columns = list(X.columns)
+        self.categorical = {c: pd.Categorical(X[c].dropna().astype(str)).categories
+                            for c in X.columns if not pd.api.types.is_numeric_dtype(X[c])}
+
+    def encode(self, X):
+        out = X.copy()
+        for c, cats in self.categorical.items():
+            out[c] = pd.Categorical(X[c].astype(str).where(X[c].notna()), categories=cats).codes.astype(float)
+            out.loc[out[c] < 0, c] = np.nan
+        return out.astype(float)
+
+    def decode(self, values):
+        frame = pd.DataFrame(np.asarray(values, dtype=float), columns=self.columns)
+        for c, cats in self.categorical.items():
+            codes = frame[c].round()
+            valid = codes.between(0, len(cats) - 1)
+            decoded = pd.Series(np.nan, index=frame.index, dtype=object)
+            decoded[valid] = np.asarray(cats)[codes[valid].astype(int)]
+            frame[c] = decoded
+        return frame
 
 
 # Generate SHAP summary plot for model explanations
@@ -791,20 +835,22 @@ def generate_shap_plot(model_path, df, target_column):
             raise UserError("error_missing_target_column")
 
         X = df.drop(columns=[target_column])
-        X = X.sample(n=min(100, len(X)))
 
         if model_path not in _shap_explainer_cache:
-            _shap_explainer_cache[model_path] = _build_shap_explainer(predictor, X)
-        explainer = _shap_explainer_cache[model_path]
+            _shap_explainer_cache[model_path] = _build_shap_explainer(predictor, X.sample(n=min(60, len(X)), random_state=0))
+        runner = _shap_explainer_cache[model_path]
 
-        shap_values = explainer(X)
-        shap_summary_plot = shap_plot_to_base64(shap.summary_plot, shap_values, X)
+        # Tree explanations are cheap, so they can cover many more patients
+        n_rows = 500 if runner.prepare else 40
+        shap_values, features = runner(X.sample(n=min(n_rows, len(X)), random_state=0))
+        shap_summary_plot = shap_plot_to_base64(shap.summary_plot, shap_values, features)
 
         return {'shap_summary_plot': shap_summary_plot}
 
     except UserError:
         raise
     except Exception:
+        logging.exception("SHAP generation failed")
         raise UserError("error_shap")
 
 # Plot distribution of predicted values for regression

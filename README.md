@@ -7,12 +7,12 @@ A user-friendly web interface to train, evaluate, and deploy machine learning mo
 ## Features
 
 - **Automated model training** — classification, regression, and time series forecasting
-- **No-code interface** — upload a CSV, pick a target column, and train
+- **No-code, three-step interface** — *Data* (upload and review every variable) → *Train* (pick the target, time and optional settings) → *Results* (metrics, plots, downloads)
 - **Honest evaluation** — out-of-fold metrics with optional holdout split
-- **Explainability** — AutoGluon feature importance and SHAP beeswarm plots
+- **Explainability** — variable importance and SHAP beeswarm plots (TreeExplainer on the best tree model, about a second)
 - **LLM assistant** — answers questions about your results in plain language
 - **Dark mode** and multilingual UI (English, French, Spanish)
-- **Download** trained models and predictions
+- **Download** trained models, plots, a PDF report and predictions; predict straight away with the model you just trained
 
 ---
 
@@ -40,8 +40,9 @@ The `study/` folder contains a controlled user study on **competence-aware adapt
 │
 ├── static/
 │   ├── lang.js              # i18n strings
-│   ├── script.js            # Frontend logic
-│   └── style.css            # Styles + dark mode
+│   ├── app.js               # Frontend logic
+│   ├── style.css            # Design tokens, components, dark mode
+│   ├── study.js / study.css # User-study mode (only with ?study=1)
 │
 └── utils/
     ├── model_utils.py       # Training, evaluation, SHAP, plots

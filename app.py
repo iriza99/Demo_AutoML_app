@@ -99,7 +99,8 @@ os.makedirs(PREDICTION_FOLDER, exist_ok=True)
 # Flask app configuration
 app.config['ENV'] = os.getenv("FLASK_ENV", "production")
 app.config['DEBUG'] = is_debug
-app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10 MB max upload
+# Trained model ZIPs (bagged ensembles) are often tens of MB, so uploads for prediction need room
+app.config['MAX_CONTENT_LENGTH'] = int(os.getenv('MAX_UPLOAD_MB', '500')) * 1024 * 1024
 
 ALLOWED_EXTENSIONS = {'csv', 'xls', 'xlsx', 'xlsm', 'arff'}
 
@@ -202,8 +203,15 @@ def train():
 
                 training_threads.pop(training_id, None)
                 stop_events.pop(training_id, None)
+            except UserError as ue:
+                logger.warning(f"User error in training thread: {ue.message_key}")
+                training_results[training_id] = {"error": ue.message_key}
+                training_threads.pop(training_id, None)
+                stop_events.pop(training_id, None)
             except Exception as e:
                 logger.exception(f"Error in training thread")
+                # Report the failure so the client stops polling
+                training_results[training_id] = {"error": "error_training_failed"}
                 training_threads.pop(training_id, None)
                 stop_events.pop(training_id, None)
 
