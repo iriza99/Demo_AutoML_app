@@ -35,7 +35,7 @@ def test_default_model_is_not_the_retired_one_and_images_are_dropped():
     assert chatbot.handle_chat_request(data) == "ok"
     call = FakeGroq.calls[-1]
     assert call["model"] == "openai/gpt-oss-120b"
-    assert call["reasoning_effort"] == "low"
+    assert call["extra_body"] == {"reasoning_effort": "low"}
     assert all(isinstance(m["content"], str) for m in call["messages"])
     text = "\n".join(m["content"] for m in call["messages"])
     assert "b: 0.5000" in text and text.index("b: 0.5000") < text.index("a: 0.2000")
@@ -49,7 +49,7 @@ def test_vision_model_keeps_images(monkeypatch):
     chatbot.handle_chat_request(data)
     call = FakeGroq.calls[-1]
     assert call["model"] == "some/vision-model"
-    assert "reasoning_effort" not in call
+    assert "extra_body" not in call
     assert any(isinstance(m["content"], list) for m in call["messages"])
 
 

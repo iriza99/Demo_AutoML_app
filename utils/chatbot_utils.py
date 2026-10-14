@@ -51,8 +51,9 @@ def groq_complete(api_key, messages, max_tokens=1024, temperature=0.7):
         messages = _text_only(messages)
     kwargs = {}
     if model.startswith('openai/gpt-oss'):
-        # Reasoning tokens count towards the completion budget; keep them short
-        kwargs['reasoning_effort'] = 'low'
+        # Reasoning tokens count towards the completion budget; keep them short.
+        # Sent through extra_body because older groq SDKs do not know the argument.
+        kwargs['extra_body'] = {'reasoning_effort': 'low'}
         max_tokens = max_tokens * 2
     client = Groq(api_key=api_key)
     completion = client.chat.completions.create(
