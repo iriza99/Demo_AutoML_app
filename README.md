@@ -16,6 +16,12 @@ A user-friendly web interface to train, evaluate, and deploy machine learning mo
 
 ---
 
+## User study mode
+
+The `study/` folder contains a controlled user study on **competence-aware adaptive guidance**: planted-trap clinical datasets, a study mode (`?study=1`) with telemetry, an implicit two-dimensional (ML × clinical domain) competence model, generic pitfall detectors and a local Jev-style typed decision layer. See [`study/README.md`](study/README.md) and [`study/TRAPS.md`](study/TRAPS.md).
+
+---
+
 ## Project Structure
 
 ```

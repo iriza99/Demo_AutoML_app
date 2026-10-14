@@ -2036,6 +2036,9 @@ async function sendChat() {
       message,
       lang
     };
+    if (typeof STUDY !== 'undefined' && STUDY && STUDY.sessionId) {
+      payload.study_session_id = STUDY.sessionId;
+    }
     const groqKey = getGroqKey();
     if (groqKey) {
       payload.groq_api_key = groqKey;

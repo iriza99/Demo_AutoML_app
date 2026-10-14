@@ -1,0 +1,94 @@
+{
+  "dataset": "hf_readmission",
+  "target": "readmission_30d",
+  "prediction_moment": {
+    "es": "En el momento del alta hospitalaria",
+    "en": "At hospital discharge"
+  },
+  "task": {
+    "es": "Entrena un modelo que, en el momento del alta, prediga qué pacientes ingresados por insuficiencia cardiaca reingresarán en 30 días. Decide al final si lo desplegarías en tu servicio.",
+    "en": "Train a model that, at discharge, predicts which heart-failure patients will be readmitted within 30 days. At the end, decide whether you would deploy it in your department."
+  },
+  "columns": {
+    "record_id": {
+      "es": "Identificador del registro",
+      "en": "Record identifier"
+    },
+    "age": {
+      "es": "Edad (años)",
+      "en": "Age (years)"
+    },
+    "sex": {
+      "es": "Sexo",
+      "en": "Sex"
+    },
+    "lvef_percent": {
+      "es": "Fracción de eyección del VI (%)",
+      "en": "Left ventricular ejection fraction (%)"
+    },
+    "nyha_class": {
+      "es": "Clase funcional NYHA al alta",
+      "en": "NYHA functional class at discharge"
+    },
+    "systolic_bp": {
+      "es": "Presión arterial sistólica al alta (mmHg)",
+      "en": "Systolic blood pressure at discharge (mmHg)"
+    },
+    "heart_rate": {
+      "es": "Frecuencia cardiaca al alta (lpm)",
+      "en": "Heart rate at discharge (bpm)"
+    },
+    "sodium": {
+      "es": "Sodio sérico (mmol/L)",
+      "en": "Serum sodium (mmol/L)"
+    },
+    "creatinine": {
+      "es": "Creatinina sérica al alta",
+      "en": "Serum creatinine at discharge"
+    },
+    "hemoglobin": {
+      "es": "Hemoglobina (g/dL)",
+      "en": "Hemoglobin (g/dL)"
+    },
+    "nt_probnp_admission": {
+      "es": "NT-proBNP al ingreso (pg/mL)",
+      "en": "NT-proBNP at admission (pg/mL)"
+    },
+    "diabetes": {
+      "es": "Diabetes mellitus",
+      "en": "Diabetes mellitus"
+    },
+    "copd": {
+      "es": "EPOC",
+      "en": "COPD"
+    },
+    "atrial_fibrillation": {
+      "es": "Fibrilación auricular",
+      "en": "Atrial fibrillation"
+    },
+    "prior_hf_admissions_12m": {
+      "es": "Ingresos por IC en los 12 meses previos",
+      "en": "HF admissions in the previous 12 months"
+    },
+    "length_of_stay_days": {
+      "es": "Estancia hospitalaria (días)",
+      "en": "Length of stay (days)"
+    },
+    "discharge_beta_blocker": {
+      "es": "Betabloqueante prescrito al alta",
+      "en": "Beta-blocker prescribed at discharge"
+    },
+    "discharge_acei_arni": {
+      "es": "IECA/ARA-II/ARNI prescrito al alta",
+      "en": "ACEi/ARB/ARNI prescribed at discharge"
+    },
+    "nt_probnp_followup": {
+      "es": "NT-proBNP en la revisión ambulatoria (pg/mL)",
+      "en": "NT-proBNP at the outpatient follow-up visit (pg/mL)"
+    },
+    "readmission_30d": {
+      "es": "Reingreso por cualquier causa en 30 días",
+      "en": "All-cause readmission within 30 days"
+    }
+  }
+}

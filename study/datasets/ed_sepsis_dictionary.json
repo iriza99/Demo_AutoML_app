@@ -1,0 +1,94 @@
+{
+  "dataset": "ed_sepsis",
+  "target": "sepsis_48h",
+  "prediction_moment": {
+    "es": "En el triaje de urgencias",
+    "en": "At emergency department triage"
+  },
+  "task": {
+    "es": "Entrena un modelo que, en el triaje de urgencias, prediga qué pacientes con sospecha de infección desarrollarán sepsis en 48 horas. Decide al final si lo desplegarías en tu servicio.",
+    "en": "Train a model that, at ED triage, predicts which patients with suspected infection will develop sepsis within 48 hours. At the end, decide whether you would deploy it in your department."
+  },
+  "columns": {
+    "episode_id": {
+      "es": "Identificador del episodio",
+      "en": "Episode identifier"
+    },
+    "age": {
+      "es": "Edad (años)",
+      "en": "Age (years)"
+    },
+    "sex": {
+      "es": "Sexo",
+      "en": "Sex"
+    },
+    "temperature": {
+      "es": "Temperatura en triaje (°C)",
+      "en": "Temperature at triage (°C)"
+    },
+    "heart_rate": {
+      "es": "Frecuencia cardiaca en triaje (lpm)",
+      "en": "Heart rate at triage (bpm)"
+    },
+    "respiratory_rate": {
+      "es": "Frecuencia respiratoria en triaje (rpm)",
+      "en": "Respiratory rate at triage (bpm)"
+    },
+    "systolic_bp": {
+      "es": "Presión arterial sistólica en triaje (mmHg)",
+      "en": "Systolic blood pressure at triage (mmHg)"
+    },
+    "glasgow_coma_scale": {
+      "es": "Escala de coma de Glasgow",
+      "en": "Glasgow coma scale"
+    },
+    "spo2": {
+      "es": "Saturación de oxígeno (%)",
+      "en": "Oxygen saturation (%)"
+    },
+    "wbc": {
+      "es": "Leucocitos (x10^9/L)",
+      "en": "White blood cells (x10^9/L)"
+    },
+    "platelets": {
+      "es": "Plaquetas (x10^9/L)",
+      "en": "Platelets (x10^9/L)"
+    },
+    "lactate": {
+      "es": "Lactato venoso",
+      "en": "Venous lactate"
+    },
+    "crp": {
+      "es": "Proteína C reactiva (mg/L)",
+      "en": "C-reactive protein (mg/L)"
+    },
+    "creatinine": {
+      "es": "Creatinina sérica (mg/dL)",
+      "en": "Serum creatinine (mg/dL)"
+    },
+    "diabetes": {
+      "es": "Diabetes mellitus",
+      "en": "Diabetes mellitus"
+    },
+    "immunosuppression": {
+      "es": "Inmunosupresión",
+      "en": "Immunosuppression"
+    },
+    "nursing_home_resident": {
+      "es": "Residente en centro sociosanitario",
+      "en": "Nursing home resident"
+    },
+    "suspected_source": {
+      "es": "Foco de infección sospechado",
+      "en": "Suspected source of infection"
+    },
+    "antibiotic_iv_ed": {
+      "es": "Antibiótico IV administrado en urgencias",
+      "en": "IV antibiotic administered in the ED"
+    },
+    "sepsis_48h": {
+      "es": "Sepsis (Sepsis-3) en las primeras 48 h",
+      "en": "Sepsis (Sepsis-3) within 48 h"
+    }
+  }
+}

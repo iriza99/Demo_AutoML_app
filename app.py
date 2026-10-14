@@ -12,6 +12,8 @@ from logging.handlers import RotatingFileHandler
 import threading
 import atexit
 from cleanup import cleanup_old_files
+from study_routes import study_bp
+from utils.study import store as study_store
 from apscheduler.schedulers.background import BackgroundScheduler
 import os
 
@@ -72,6 +74,7 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
+app.register_blueprint(study_bp)
 
 # Set up background scheduler for periodic cleanup
 scheduler = BackgroundScheduler()
@@ -416,7 +419,10 @@ def download_prediction(filename):
 def chat():
     try:
         data = request.get_json()
-        response = handle_chat_request(data)
+        # In the adaptive study condition, condition the assistant on the inferred profile
+        study_session = study_store.get(data.get('study_session_id') or '')
+        extra_system = study_session.chat_instruction() if study_session else ''
+        response = handle_chat_request(data, extra_system=extra_system)
         return jsonify({"response": response})
     except ValueError as ve:
         return jsonify({"error": str(ve)}), 400

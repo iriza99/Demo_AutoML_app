@@ -533,6 +533,7 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
             'task_type': task_type,
             'metrics': perf_data,
             'feature_importance_plot': feature_importance_plot,
+            'feature_importance': {str(k): float(v) for k, v in feature_importance_df['importance'].items() if np.isfinite(v)},
             'model_path': save_path,
             'leaderboard': leaderboard.to_dict(orient='records'),
             'summary_LLM' : summary

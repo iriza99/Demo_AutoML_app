@@ -21,7 +21,7 @@ def clean_markdown(text):
     # Remove markdown bold and italic markers from text
     return re.sub(r'(\*\*|\*)', '', text)
 
-def handle_chat_request(data):
+def handle_chat_request(data, extra_system=''):
     """
     Handles a chat request by preparing the context and sending it to the Groq API.
     It builds the conversation history, attaches dataset previews, stats, plots, etc.
@@ -45,6 +45,8 @@ def handle_chat_request(data):
     training_pred_plot = data.get('png_result_training_for_prediction')
     # Start with a system prompt for the chat
     messages = [{"role": "system", "content": get_system_prompt_chat(lang)}]
+    if extra_system:
+        messages.append({"role": "system", "content": extra_system})
 
     # If the user asks about the dataset but none is provided, add a warning message
     if dataset is None and any(kw in user_input.lower() for kw in get_keywords_by_lang(lang)):
