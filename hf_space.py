@@ -8,11 +8,16 @@ used. The defaults are the public ones (see the Dockerfile and README).
 import os
 import sys
 
-os.environ.setdefault("AUTOML_REQUIRE_USER_KEY", "1")   # every user brings their own Groq key
-os.environ.setdefault("MAX_CONCURRENT_TRAININGS", "1")
-os.environ.setdefault("AUTOML_GPU", "0")
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
-port = os.environ.get("GRADIO_SERVER_PORT", "7860")
+DEFAULTS = {
+    "AUTOML_REQUIRE_USER_KEY": "1",   # every user brings their own Groq key
+    "MAX_CONCURRENT_TRAININGS": "1",
+    "AUTOML_GPU": "0",
+    "MPLCONFIGDIR": "/tmp/matplotlib",
+}
+for name, value in DEFAULTS.items():
+    if not os.environ.get(name, "").strip():  # unset or empty in the Space settings
+        os.environ[name] = value
+port = os.environ.get("GRADIO_SERVER_PORT", "").strip() or "7860"
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 # One worker: training state lives in memory, so every request must reach the same process

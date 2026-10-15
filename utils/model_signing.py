@@ -20,7 +20,7 @@ import zipfile
 
 MANIFEST = "automl_manifest.json"
 SIGNATURE = "automl_signature"
-MAX_UNCOMPRESSED = int(os.getenv("MAX_MODEL_UNZIPPED_MB", "4096")) * 1024 * 1024
+MAX_UNCOMPRESSED = int(os.getenv("MAX_MODEL_UNZIPPED_MB", "").strip() or 4096) * 1024 * 1024
 _KEY_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".secret_key")
 _key = None
 

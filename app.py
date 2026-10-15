@@ -22,7 +22,7 @@ import traceback
 import uuid
 
 # Trainings that may run at the same time (each one uses every CPU core and several GB of RAM)
-MAX_CONCURRENT_TRAININGS = int(os.getenv('MAX_CONCURRENT_TRAININGS', '1'))
+MAX_CONCURRENT_TRAININGS = max(1, int(os.getenv('MAX_CONCURRENT_TRAININGS', '').strip() or 1))
 # Finished results are kept this long so the page can fetch them again (e.g. after a reload)
 RESULT_TTL_SECONDS = 6 * 3600
 
@@ -108,7 +108,7 @@ os.makedirs(PREDICTION_FOLDER, exist_ok=True)
 app.config['ENV'] = os.getenv("FLASK_ENV", "production")
 app.config['DEBUG'] = is_debug
 # Trained model ZIPs (bagged ensembles) are often tens of MB, so uploads for prediction need room
-app.config['MAX_CONTENT_LENGTH'] = int(os.getenv('MAX_UPLOAD_MB', '500')) * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = int(os.getenv('MAX_UPLOAD_MB', '').strip() or 500) * 1024 * 1024
 
 ALLOWED_EXTENSIONS = {'csv', 'xls', 'xlsx', 'xlsm', 'arff'}
 
