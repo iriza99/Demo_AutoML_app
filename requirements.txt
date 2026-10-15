@@ -16,3 +16,5 @@ apscheduler==3.11.3
 matplotlib==3.10.9
 openpyxl>=3.1
 tabulate>=0.9
+# Free Hugging Face Space (hf_space.py): serves the Flask app through an ASGI server
+a2wsgi>=1.10

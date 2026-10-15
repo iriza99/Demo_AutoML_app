@@ -212,6 +212,9 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
             fit_kwargs['num_gpus'] = 1
             fit_kwargs['hyperparameters'] = gpu_hyperparameters()
             logging.info("GPU detected: training XGBoost, CatBoost and neural networks on GPU")
+        else:
+            # Explicit: on Hugging Face ZeroGPU, PyTorch may report a GPU that only exists inside @spaces.GPU calls
+            fit_kwargs['num_gpus'] = 0
         if progress is not None:
             progress.gpu = used_gpu
         try:
