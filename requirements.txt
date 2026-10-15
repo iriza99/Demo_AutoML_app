@@ -1,10 +1,11 @@
 # Versions tested together.
 # CPU build of PyTorch (several GB smaller). With an NVIDIA GPU, install a CUDA build
-# of torch 2.7.1 afterwards (see README).
+# of the same torch version afterwards (see README). 2.10.0 is also accepted by
+# Hugging Face ZeroGPU Spaces.
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.7.1
-autogluon.tabular[lightgbm,catboost,xgboost]==1.4.0
-autogluon.timeseries==1.4.0
+torch==2.10.0
+autogluon.tabular[lightgbm,catboost,xgboost]==1.6.3
+autogluon.timeseries==1.6.3
 flask==3.1.3
 gunicorn==26.2.0
 groq==1.7.0

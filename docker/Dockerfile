@@ -18,7 +18,7 @@ ENV HOME=/home/user \
 WORKDIR /home/user/app
 
 # CPU-only PyTorch first (the default wheel bundles CUDA and is several GB larger)
-RUN pip install --no-cache-dir --user torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir --user torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
 COPY --chown=user requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
