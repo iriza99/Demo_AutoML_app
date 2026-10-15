@@ -3,8 +3,10 @@ title: AutoML Assistant
 emoji: 📈
 colorFrom: blue
 colorTo: indigo
-sdk: docker
-app_port: 7860
+sdk: gradio
+sdk_version: 5.49.1
+python_version: "3.12"
+app_file: hf_space.py
 pinned: false
 short_description: Train, evaluate and explain ML models without code
 ---
@@ -67,18 +69,18 @@ A user-friendly web interface to train, evaluate, and deploy machine learning mo
 
 ## Deploy on Hugging Face Spaces
 
-The repository is ready for a [Docker Space](https://huggingface.co/docs/hub/spaces-sdks-docker): the `Dockerfile` installs a CPU build of PyTorch and the pinned requirements and starts gunicorn on port 7860, and the block at the top of this README is the Space configuration.
+The repository is ready for a free Space. Hugging Face installs `requirements.txt` (CPU build of PyTorch) and `packages.txt`, then runs `hf_space.py`, which starts the Flask app with gunicorn on port 7860. The **Gradio** SDK is used only because it is free; Gradio itself is not used. The block at the top of this README is the Space configuration. (With a paid plan, the `Dockerfile` works too: change `sdk:` to `docker` and add `app_port: 7860`.)
 
-1. On huggingface.co: **New Space** → name it → **SDK: Docker** (blank template) → hardware *CPU basic* (free) or *CPU upgrade* → create.
+1. On huggingface.co: **New Space** → name it → **SDK: Gradio** (template *Blank*) → hardware *CPU basic* (free) → create.
 2. In the Space: **Settings → Variables and secrets → New secret** `AUTOML_SECRET_KEY` with a long random value (e.g. the output of `python -c "import secrets; print(secrets.token_hex(32))"`). It signs the trained models; without it, models downloaded before a restart cannot be used to predict.
-3. Push the code (from the project folder; use a Hugging Face *write* token as the password):
+3. Push the code (from the project folder; use a Hugging Face *write* token as the password). The Space starts with a sample commit, so the first push needs `--force`:
    ```bash
    git remote add space https://huggingface.co/spaces/<user>/<space-name>
-   git push space claude/wizardly-curie-egb6z4:main
+   git push --force space claude/wizardly-curie-egb6z4:main
    ```
-   The first build takes about 10–15 minutes. Later pushes rebuild automatically.
+   The first build takes about 10–15 minutes (*Logs* tab). Later pushes rebuild automatically.
 
-What the public image does differently from running it locally:
+What the public Space does differently from running it locally:
 
 - **Each user enters their own Groq key** (`AUTOML_REQUIRE_USER_KEY=1`); a `GROQ_API_KEY` on the server is never used, so nobody spends your quota. The key stays in the user's browser.
 - **One training at a time** (`MAX_CONCURRENT_TRAININGS=1`): a second user is asked to retry in a few minutes. Each training uses every CPU core.

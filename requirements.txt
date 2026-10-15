@@ -1,4 +1,8 @@
-# Versions tested together. PyTorch is installed separately in the Dockerfile (CPU build).
+# Versions tested together.
+# CPU build of PyTorch (several GB smaller). With an NVIDIA GPU, install a CUDA build
+# of torch 2.7.1 afterwards (see README).
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.7.1
 autogluon.tabular[lightgbm,catboost,xgboost]==1.4.0
 autogluon.timeseries==1.4.0
 flask==3.1.3
