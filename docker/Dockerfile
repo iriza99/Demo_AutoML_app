@@ -1,4 +1,6 @@
-# AutoML Assistant — image for Hugging Face Spaces (Docker SDK) or any container host.
+# AutoML Assistant — image for Hugging Face Spaces (Docker SDK, paid) or any container host.
+# Kept in docker/ so a free (Gradio SDK) Space does not mistake the repo for a Docker Space.
+# Build from the project root: docker build -f docker/Dockerfile -t automl-assistant .
 FROM python:3.12-slim
 
 # LightGBM needs OpenMP

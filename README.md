@@ -69,7 +69,7 @@ A user-friendly web interface to train, evaluate, and deploy machine learning mo
 
 ## Deploy on Hugging Face Spaces
 
-The repository is ready for a free Space. Hugging Face installs `requirements.txt` (CPU build of PyTorch) and `packages.txt`, then runs `hf_space.py`, which starts the Flask app with gunicorn on port 7860. The **Gradio** SDK is used only because it is free; Gradio itself is not used. The block at the top of this README is the Space configuration. (With a paid plan, the `Dockerfile` works too: change `sdk:` to `docker` and add `app_port: 7860`.)
+The repository is ready for a free Space. Hugging Face installs `requirements.txt` (CPU build of PyTorch) and `packages.txt`, then runs `hf_space.py`, which starts the Flask app with gunicorn on port 7860. The **Gradio** SDK is used only because it is free; Gradio itself is not used. The block at the top of this README is the Space configuration. (With a paid plan you can use Docker instead: move `docker/Dockerfile` and `docker/Dockerfile.dockerignore` to the root as `Dockerfile` and `.dockerignore`, change `sdk:` to `docker` and add `app_port: 7860`. On any other host: `docker build -f docker/Dockerfile -t automl-assistant .`)
 
 1. On huggingface.co: **New Space** → name it → **SDK: Gradio** (template *Blank*) → hardware *CPU basic* (free) → create.
 2. In the Space: **Settings → Variables and secrets → New secret** `AUTOML_SECRET_KEY` with a long random value (e.g. the output of `python -c "import secrets; print(secrets.token_hex(32))"`). It signs the trained models; without it, models downloaded before a restart cannot be used to predict.
