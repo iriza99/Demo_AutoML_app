@@ -21,7 +21,7 @@ A user-friendly web interface to train, evaluate, and deploy machine learning mo
 
 - **Automated model training** — classification, regression, and time series forecasting
 - **No-code, three-step interface** — *Data* (upload and review every variable) → *Train* (pick the target, time and optional settings) → *Results* (metrics, plots, downloads)
-- **Honest evaluation** — out-of-fold metrics with optional holdout split
+- **Honest evaluation** — out-of-fold metrics with optional holdout split, or your own validation and test files (*Data → Own validation and test sets*): the model is tuned on validation and every result (metrics, plots, importance, model comparison) comes from the test set
 - **Results in plain language** — a one-line verdict, all metrics together, automatic checks (identifier-like or dominant variables, class imbalance) with one-click fixes, and interactive charts (confusion matrix, ROC, predicted vs actual)
 - **Explainability** — variable importance and an interactive SHAP plot with a summary in words (TreeExplainer on the best tree model, about a second)
 - **Expert mode** (settings) — technical details, configuration and every model tried, open by default

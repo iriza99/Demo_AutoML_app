@@ -554,6 +554,8 @@ function removeCSVFile() {
   $("csv-dropzone").hidden = false;
   $("how-it-works").hidden = false;
   $("examples").hidden = false;
+  splitFiles.val = null;
+  splitFiles.test = null;
   clearSession();
   $("vars-table").innerHTML = "";
   $("preview-table").innerHTML = "";
@@ -760,8 +762,13 @@ function updateTrainSummary() {
     [t("metric"), metric],
     [t("time"), $("time-limit-display").textContent],
   ];
+  if (splitFiles.val && task !== "timeseries") items.push([t("splitVal"), `${fmt(splitFiles.val.rows.length - 1, 0)} ${t("rows")}`]);
+  if (splitFiles.test && task !== "timeseries") items.push([t("splitTest"), `${fmt(splitFiles.test.rows.length - 1, 0)} ${t("rows")}`]);
+  // A validation file replaces cross-validation
+  $("adv-cv-container").hidden = task === "timeseries" || !!splitFiles.val;
   list.innerHTML = items.map(([k, v]) => `<dt>${k}</dt><dd>${typeof v === "string" && v.includes("<span") ? v : esc(v)}</dd>`).join("");
   $("start-training-btn").disabled = !target;
+  renderSplits();
   $("start-training-btn").title = target ? "" : t("chooseTargetFirst");
   updateStepSubtitles();
 }
@@ -771,6 +778,7 @@ function prepareTrainingTable(dropped) {
   const keep = header.map((_, i) => i).filter(i => !dropped.includes(header[i]));
   const table = datasetRows.map(r => keep.map(i => r[i]));
   const imputationChoices = {};
+  const fills = {};  // column → value used for its missing cells (reused for validation/test files)
   if ($("enable-imputation")?.checked) {
     $("imputation-controls").querySelectorAll("select").forEach((select) => {
       imputationChoices[select.dataset.col] = {
@@ -800,10 +808,96 @@ function prepareTrainingTable(dropped) {
         fill = constant;
       }
       if (fill === undefined) return;
+      fills[col] = fill;
       for (let r = 1; r < table.length; r++) if (isMissing(table[r][idx])) table[r][idx] = fill;
     });
   }
-  return { table, imputationChoices };
+  return { table, imputationChoices, fills };
+}
+
+// ── Own validation / test sets ───────────────────────────────────────────────
+// The main file trains; an optional validation file tunes and selects models and
+// an optional test file is used only for the final metrics and plots.
+const splitFiles = { val: null, test: null };  // kind → { file, rows }
+
+async function loadSplitFile(kind, file) {
+  const input = $(`split-${kind}-input`);
+  if (input) input.value = "";
+  if (!file) return;
+  try {
+    const raw = await parseTableFile(file);
+    if (!raw || raw.length < 3) throw new Error("empty");
+    const width = raw[0].length;
+    const rows = raw.map(r => (r.length === width ? r : Array.from({ length: width }, (_, i) => r[i] ?? "")));
+    splitFiles[kind] = { file, rows };
+  } catch (_) {
+    showAlert(t("pleaseSelectFile"), "warning");
+    return;
+  }
+  renderSplits();
+  updateTrainSummary();
+  saveSession();
+}
+
+function removeSplit(kind) {
+  splitFiles[kind] = null;
+  renderSplits();
+  updateTrainSummary();
+  saveSession();
+}
+
+// Columns the split must contain: every training column the model will use, target included
+function splitProblems(kind) {
+  const split = splitFiles[kind];
+  if (!split || !datasetRows) return null;
+  const dropped = new Set(getDroppedColumns());
+  const target = $("target-column").value;
+  const header = split.rows[0].map(String);
+  const missing = datasetRows[0].filter(c => !dropped.has(c) && !header.includes(c));
+  let targetMissing = 0;
+  if (target && header.includes(target)) {
+    const idx = header.indexOf(target);
+    targetMissing = split.rows.slice(1).filter(r => isMissing(r[idx])).length;
+  }
+  return { missing, targetMissing };
+}
+
+function renderSplits() {
+  const section = $("splits-section");
+  if (!section) return;
+  section.hidden = detectedTimeColumns.length > 0;  // time series use their own split by date
+  ["val", "test"].forEach((kind) => {
+    const body = document.querySelector(`#split-${kind} .split-body`);
+    const split = splitFiles[kind];
+    if (!split) {
+      body.innerHTML = `<button class="dropzone dropzone-sm" type="button" onclick="document.getElementById('split-${kind}-input').click()">${t("chooseFile")}</button>`;
+      return;
+    }
+    const p = splitProblems(kind);
+    const status = p.missing.length
+      ? `<p class="split-status bad">${esc(t("splitMissingCols", { cols: p.missing.slice(0, 6).join(", ") + (p.missing.length > 6 ? "…" : "") }))}</p>`
+      : p.targetMissing
+        ? `<p class="split-status bad">${esc(t("splitTargetMissing", { n: p.targetMissing }))}</p>`
+        : `<p class="split-status ok">✓ ${esc(t("splitOk"))}</p>`;
+    body.innerHTML = `<div class="file-chip"><span>${esc(split.file.name)} · ${fmt(split.rows.length - 1, 0)} ${t("rows")}</span>
+      <button class="icon-btn icon-btn-sm" type="button" onclick="removeSplit('${kind}')" aria-label="${esc(t("remove"))}">×</button></div>${status}`;
+  });
+  if (splitFiles.val || splitFiles.test) section.open = true;
+}
+
+// Same columns, order and missing-value filling as the training table
+function alignSplit(kind, keepHeader, fills) {
+  const rows = splitFiles[kind].rows;
+  const header = rows[0].map(String);
+  const index = keepHeader.map(c => header.indexOf(c));
+  const out = [keepHeader];
+  rows.slice(1).forEach((r) => {
+    out.push(keepHeader.map((c, j) => {
+      const v = r[index[j]] ?? "";
+      return isMissing(v) && fills[c] !== undefined ? fills[c] : v;
+    }));
+  });
+  return out;
 }
 
 function startTraining() {
@@ -825,7 +919,16 @@ function startTraining() {
     return;
   }
 
-  const { table, imputationChoices } = prepareTrainingTable(dropped);
+  for (const kind of ["val", "test"]) {
+    const p = splitProblems(kind);
+    if (p && (p.missing.length || p.targetMissing)) {
+      showAlert(t("splitFixFirst", { set: t(kind === "val" ? "splitVal" : "splitTest") }), "error");
+      setWizardStep(STEP.DATA);
+      $("splits-section").open = true;
+      return;
+    }
+  }
+  const { table, imputationChoices, fills } = prepareTrainingTable(dropped);
   dataPreprocessing = { data_preprocessing: { columns_drop: dropped, imputation_missing_value: imputationChoices } };
   const blob = new Blob([Papa.unparse(table, { quotes: false })], { type: "text/csv" });
   lastCleanedCsvBlob = blob;
@@ -833,6 +936,11 @@ function startTraining() {
 
   const formData = new FormData();
   formData.append("file", blob, `${datasetBaseName()}.csv`);
+  ["val", "test"].forEach((kind) => {
+    if (!splitFiles[kind] || task === "timeseries") return;
+    const csv = Papa.unparse(alignSplit(kind, table[0], fills), { quotes: false });
+    formData.append(`${kind}_file`, new Blob([csv], { type: "text/csv" }), `${kind}.csv`);
+  });
   formData.append("target_column", target);
   formData.append("lang", currentLang());
   formData.append("time_limit", String(Math.max(60, minutes * 60)));
@@ -850,6 +958,8 @@ function startTraining() {
   lastTrainConfig = {
     metricLabel: Object.values(ADVANCED_METRICS).flat().find(m => m.value === metric)?.label || metric || "—",
     cv: useCv, valPct: parseInt($("adv-val-size").value, 10), minutes,
+    valRows: splitFiles.val && task !== "timeseries" ? splitFiles.val.rows.length - 1 : null,
+    testRows: splitFiles.test && task !== "timeseries" ? splitFiles.test.rows.length - 1 : null,
     excluded: dropped.filter(c => c !== target),
     families: Array.from($("adv-models-container").querySelectorAll("input:checked")).map(cb => cb.parentElement.textContent.trim()),
   };
@@ -1300,7 +1410,7 @@ function renderTrainingResults(data, { silent = false } = {}) {
         <div class="verdict-text">
           <span class="eyebrow">${taskLabel}</span>
           <h2>${esc(headline)}</h2>
-          <p class="muted">${t("verdictSub", { rows: fmt(totalDataRows, 0), time: fmtDuration(data.train_time) })}
+          <p class="muted">${evaluationSentence(data)}
             <span class="expert-only"> · ${t("bestModel")}: <span class="mono">${esc(data.best_model)}</span></span>
             ${data.used_gpu ? ' <span class="pill pill-ok">GPU</span>' : ""}</p>
         </div>
@@ -1322,7 +1432,7 @@ function renderTrainingResults(data, { silent = false } = {}) {
     </nav>
 
     <section class="res-section" id="res-performance">
-      <div class="res-head"><h3>${t("secPerformance")}</h3><p class="muted">${t("secPerformanceSub")}</p></div>
+      <div class="res-head"><h3>${t("secPerformance")}</h3><p class="muted">${data.evaluation?.kind === "test" ? t("secPerformanceSubTest", { n: fmt(data.evaluation.n, 0) }) : t("secPerformanceSub")}</p></div>
       ${plots.length ? `<div class="plot-grid">${plots.join("")}</div>` : `<p class="muted">${t("noPlots")}</p>`}
     </section>
 
@@ -1396,6 +1506,21 @@ function showResultsSection(id) {
 // Kept for older callers
 function setResultsTab(id) { showResultsSection({ perf: "performance" }[id] || id); }
 
+function evaluationSentence(data) {
+  const e = data.evaluation || {};
+  const time = fmtDuration(data.train_time);
+  if (e.kind === "test") return t("verdictSubTest", { rows: fmt(e.n, 0), time });
+  if (e.kind === "validation") return t("verdictSubVal", { rows: fmt(e.n, 0), time });
+  return t("verdictSub", { rows: fmt(totalDataRows, 0), time });
+}
+
+function evaluationLabel(data, c = lastTrainConfig || {}) {
+  const e = data.evaluation || {};
+  if (e.kind === "test") return t("evalTest", { n: fmt(e.n, 0) }) + (c.valRows ? ` · ${t("evalOwnVal", { n: fmt(c.valRows, 0) })}` : "");
+  if (e.kind === "validation") return t("evalOwnVal", { n: fmt(e.n, 0) });
+  return c.cv === false ? t("evalHoldout", { pct: c.valPct }) : t("evalCv");
+}
+
 function renderTrainingDetails(data) {
   const c = lastTrainConfig || {};
   const rows = [
@@ -1403,7 +1528,7 @@ function renderTrainingDetails(data) {
     [t("target"), lastUsedTargetColumn],
     [t("bestModel"), `<span class="mono">${esc(data.best_model)}</span>`],
     [t("evalMetric"), c.metricLabel || "—"],
-    [t("evaluation"), c.cv === false ? t("evalHoldout", { pct: c.valPct }) : t("evalCv")],
+    [t("evaluation"), evaluationLabel(data, c)],
     [t("timeTitle"), `${fmtDuration(data.train_time)} / ${formatMinutes(c.minutes || 0)}`],
     [t("excludedVars"), c.excluded?.length ? c.excluded.map(esc).join(", ") : t("none")],
     [t("modelFamilies"), c.families?.length ? c.families.map(esc).join(", ") : "—"],
@@ -1511,16 +1636,21 @@ function renderImportance(importance) {
 }
 
 function renderLeaderboard(rows, best) {
-  const scores = rows.map(r => r.score_val).filter(v => typeof v === "number");
+  const hasTest = rows.some(r => typeof r.score_test === "number");
+  const key = hasTest ? "score_test" : "score_val";
+  const scores = rows.map(r => r[key]).filter(v => typeof v === "number");
   const min = Math.min(...scores), max = Math.max(...scores), span = (max - min) || 1;
+  const num = (v, d) => (typeof v === "number" ? fmt(v, d) : "—");
   const body = rows.map(r => `<tr class="${r.model === best ? "is-best" : ""}">
       <td>${esc(r.model)}${r.model === best ? ` <span class="badge badge-excellent">${t("best")}</span>` : ""}</td>
-      <td class="num"><div class="score-cell"><div class="meter meter-primary"><span style="width:${typeof r.score_val === "number" ? (15 + 85 * (r.score_val - min) / span).toFixed(1) : 0}%"></span></div>${typeof r.score_val === "number" ? fmt(r.score_val, 4) : "—"}</div></td>
+      <td class="num"><div class="score-cell"><div class="meter meter-primary"><span style="width:${typeof r[key] === "number" ? (15 + 85 * (r[key] - min) / span).toFixed(1) : 0}%"></span></div>${num(r[key], 4)}</div></td>
+      ${hasTest ? `<td class="num">${num(r.score_val, 4)}</td>` : ""}
       <td class="num">${typeof r.fit_time === "number" ? `${fmt(r.fit_time, 1)} s` : "—"}</td>
       <td class="num">${typeof r.pred_time_val === "number" ? `${fmt(r.pred_time_val, 2)} s` : "—"}</td></tr>`).join("");
   return `<h4>${t("tabModels")}</h4><div class="table-wrap"><table class="table">
-    <thead><tr><th>${t("model")}</th><th class="num">${t("scoreVal")}</th><th class="num">${t("fitTime")}</th><th class="num">${t("predictTime")}</th></tr></thead>
-    <tbody>${body}</tbody></table></div>`;
+    <thead><tr><th>${t("model")}</th>${hasTest ? `<th class="num">${t("scoreTest")}</th>` : ""}<th class="num">${t("scoreVal")}</th><th class="num">${t("fitTime")}</th><th class="num">${t("predictTime")}</th></tr></thead>
+    <tbody>${body}</tbody></table></div>
+    ${hasTest ? `<p class="muted small">${t("bestChosenOnVal")}</p>` : ""}`;
 }
 
 async function generateShapPlot() {
@@ -1601,12 +1731,13 @@ async function downloadPDF() {
       excluded: ((dataPreprocessing.data_preprocessing || {}).columns_drop || []).filter(c => c !== lastUsedTargetColumn),
       imputation: (dataPreprocessing.data_preprocessing || {}).imputation_missing_value || {},
       task_type: r.task_type, best_model: r.best_model, train_time: r.train_time, used_gpu: !!r.used_gpu,
+      evaluation: evaluationLabel(r),
       metrics: Object.fromEntries(metricEntries(r).map(([k, m]) => [k, m.value])),
       plot_data: r.plot_data || null,
       feature_importance: r.feature_importance || null,
       feature_importance_plot: r.feature_importance ? null : (r.feature_importance_plot || null),
       forecast_plot: r.forecast_plot || null,
-      leaderboard: (r.leaderboard || []).map(row => ({ model: row.model, score_val: row.score_val, fit_time: row.fit_time })),
+      leaderboard: (r.leaderboard || []).map(row => ({ model: row.model, score_test: row.score_test, score_val: row.score_val, fit_time: row.fit_time })),
       stats: dataSetStats.map(({ hist, ...rest }) => rest),
     };
     if (shapPlot) payload.shap_plot = shapPlot;
@@ -1854,7 +1985,9 @@ async function sendChat(preset) {
         payload.result = {
           task_type: lastResult.task_type, target: lastUsedTargetColumn, best_model: lastResult.best_model,
           train_time: lastResult.train_time, majority_share: baseline,
-          evaluation: lastTrainConfig && lastTrainConfig.cv === false ? `holdout ${lastTrainConfig.valPct}%` : "out-of-fold (cross-validation)",
+          evaluation: lastResult.evaluation?.kind === "test" ? `user's test set (${lastResult.evaluation.n} records, never seen in training)`
+            : lastResult.evaluation?.kind === "validation" ? `user's validation set (${lastResult.evaluation.n} records)`
+            : lastTrainConfig && lastTrainConfig.cv === false ? `holdout ${lastTrainConfig.valPct}%` : "out-of-fold (cross-validation)",
           metrics: Object.fromEntries(metricEntries(lastResult).map(([k, m]) => [k, m.value])),
           leaderboard: (lastResult.leaderboard || []).slice(0, 10).map(r => ({ model: r.model, score_val: r.score_val })),
         };
@@ -1954,6 +2087,10 @@ function appState() {
     state.target = target;
     state.task = taskTypeFor(target);
     state.excluded = getDroppedColumns();
+    state.own_splits = {
+      validation_rows: splitFiles.val ? splitFiles.val.rows.length - 1 : null,
+      test_rows: splitFiles.test ? splitFiles.test.rows.length - 1 : null,
+    };
     state.metric = $("adv-eval-metric").value;
     state.metric_options = Array.from($("adv-eval-metric").options).map(o => o.value);
     state.time_minutes = parseInt($("training-time-limit").value, 10);
@@ -2140,6 +2277,7 @@ function saveSession() {
       result: lastResult, usedTarget: lastUsedTargetColumn, cleanedCsv: lastCleanedCsvBlob,
       preprocessing: dataPreprocessing, trainConfig: lastTrainConfig, shapPlot, shapSummary,
       trainingId, trainingTimeLimit,
+      valFile: splitFiles.val?.file || null, testFile: splitFiles.test?.file || null,
     };
     try { await sessionStore("readwrite", st => st.put(state, "last")); } catch (_) { /* storage unavailable */ }
   }, 400);
@@ -2164,6 +2302,8 @@ async function restoreSession() {
       if (cb) { cb.checked = false; cb.closest("tr")?.classList.add("is-dropped"); }
     });
     if (state.target && datasetRows[0].includes(state.target)) $("target-column").value = state.target;
+    if (state.valFile) await loadSplitFile("val", state.valFile);
+    if (state.testFile) await loadSplitFile("test", state.testFile);
     onTargetChange();
     if (state.minutes) { $("training-time-limit").value = String(state.minutes); updateTimeDisplay(); }
     if (state.metric && Array.from($("adv-eval-metric").options).some(o => o.value === state.metric)) $("adv-eval-metric").value = state.metric;

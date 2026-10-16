@@ -44,6 +44,7 @@ TEXT = {
         "metric": "Metric", "value": "Value", "meaning": "What it means",
         "figures": "Figures", "importance": "Variable importance", "shap": "SHAP explanation",
         "forecast": "Forecast",
+        "evaluation": "Evaluation", "score_test": "Test score",
         "models": "Models compared", "model": "Model", "score": "Validation score", "fit": "Training (s)",
         "data": "Variables in the dataset", "name": "Name", "type": "Type", "missing": "Missing",
         "unique": "Distinct", "summary": "Summary",
@@ -71,6 +72,7 @@ TEXT = {
         "metric": "Métrica", "value": "Valor", "meaning": "Qué significa",
         "figures": "Figuras", "importance": "Importancia de las variables", "shap": "Explicación SHAP",
         "forecast": "Previsión",
+        "evaluation": "Evaluación", "score_test": "Puntuación en prueba",
         "models": "Modelos comparados", "model": "Modelo", "score": "Puntuación de validación", "fit": "Entrenamiento (s)",
         "data": "Variables del conjunto de datos", "name": "Nombre", "type": "Tipo", "missing": "Faltantes",
         "unique": "Distintos", "summary": "Resumen",
@@ -98,6 +100,7 @@ TEXT = {
         "metric": "Métrique", "value": "Valeur", "meaning": "Signification",
         "figures": "Figures", "importance": "Importance des variables", "shap": "Explication SHAP",
         "forecast": "Prévision",
+        "evaluation": "Évaluation", "score_test": "Score de test",
         "models": "Modèles comparés", "model": "Modèle", "score": "Score de validation", "fit": "Entraînement (s)",
         "data": "Variables du jeu de données", "name": "Nom", "type": "Type", "missing": "Manquants",
         "unique": "Distincts", "summary": "Résumé",
@@ -324,7 +327,8 @@ def build_report(data, lang="en"):
         for key in [k for k in METRIC_ORDER if k in metrics] + [k for k in metrics if k not in METRIC_ORDER]:
             rows.append([_p(METRIC_LABELS.get(key, key), S["cellb"]), _p(_fmt(metrics[key]), S["cell"]),
                          _p(T.get(f"m_{key}", ""), S["cell"])])
-        story += [_p(T["metrics"], S["h2"]), _p(T["metrics_note"], S["muted"]), Spacer(1, 4),
+        note = f'{T["evaluation"]}: {data["evaluation"]}' if data.get("evaluation") else T["metrics_note"]
+        story += [_p(T["metrics"], S["h2"]), _p(note, S["muted"]), Spacer(1, 4),
                   _table(rows, [width * 0.18, width * 0.14, width * 0.68])]
 
     # Figures
@@ -365,13 +369,15 @@ def build_report(data, lang="en"):
     # Leaderboard
     leaderboard = [r for r in (data.get("leaderboard") or []) if isinstance(r, dict) and r.get("model")]
     if leaderboard:
-        rows = [[_p(T["model"], S["head"]), _p(T["score"], S["head"]), _p(T["fit"], S["head"])]]
+        has_test = any(isinstance(r.get("score_test"), (int, float)) for r in leaderboard)
+        num = lambda v, d=4: _p(_fmt(float(v), d) if isinstance(v, (int, float)) else "—", S["cell"])  # noqa: E731
+        head = [T["model"]] + ([T["score_test"]] if has_test else []) + [T["score"], T["fit"]]
+        rows = [[_p(h, S["head"]) for h in head]]
         for r in leaderboard[:12]:
-            score, fit = r.get("score_val"), r.get("fit_time")
-            rows.append([_p(r["model"], S["cell"]),
-                         _p(_fmt(float(score)) if isinstance(score, (int, float)) else "—", S["cell"]),
-                         _p(_fmt(float(fit), 3) if isinstance(fit, (int, float)) else "—", S["cell"])])
-        story += [_p(T["models"], S["h2"]), _table(rows, [width * 0.5, width * 0.25, width * 0.25])]
+            rows.append([_p(r["model"], S["cell"])] + ([num(r.get("score_test"))] if has_test else [])
+                        + [num(r.get("score_val")), num(r.get("fit_time"), 3)])
+        widths = [0.4, 0.2, 0.2, 0.2] if has_test else [0.5, 0.25, 0.25]
+        story += [_p(T["models"], S["h2"]), _table(rows, [width * w for w in widths])]
 
     # Columns
     stats = [s for s in (data.get("stats") or []) if isinstance(s, dict) and s.get("name") is not None]

@@ -136,6 +136,24 @@ def create_training_folder(dataset_filename, base_dir=MODEL_FOLDER):
     os.makedirs(path, exist_ok=True)
     return path, folder_name, zip_filename
 
+def _load_split(file, train_df, target_column):
+    """Read an optional validation/test file and align it to the training columns."""
+    if not file or not file.filename:
+        return None
+    if not allowed_file(file.filename):
+        raise UserError("error_unsupported_file_format")
+    split = load_dataframe(file)
+    missing = [c for c in train_df.columns if c not in split.columns]
+    if missing:
+        raise UserError("error_split_columns")
+    split = split[list(train_df.columns)].reset_index(drop=True)
+    if split[target_column].isnull().any():
+        raise UserError("error_split_target_missing")
+    if len(split) < 2:
+        raise UserError("error_split_too_small")
+    return split
+
+
 def _model_path_for(training_id):
     """Model folder of a training run, resolved on the server only (never a client-supplied path)."""
     if training_id in _trained_model_paths:
@@ -218,6 +236,12 @@ def train():
         if df[target_column].isnull().all():
             raise UserError("error_target_all_missing")
 
+        # Optional user-defined validation and test sets (same columns as the training file)
+        val_df = _load_split(request.files.get('val_file'), df, target_column)
+        test_df = _load_split(request.files.get('test_file'), df, target_column)
+        if (val_df is not None or test_df is not None) and time_column:
+            raise UserError("error_split_timeseries")
+
         markdown_preview = preview_dataset(df)
         training_folder, training_id, zip_filename = create_training_folder(filename)
         logger.info(f"Training folder created: {training_id}")
@@ -234,7 +258,7 @@ def train():
                                      time_column=time_column, prediction_length_percent=prediction_length_percent,
                                      eval_metric=eval_metric, excluded_model_types=excluded_model_types,
                                      num_bag_folds=num_bag_folds, val_size=val_size, progress=progress,
-                                     lang=lang)
+                                     lang=lang, val_df=val_df, test_df=test_df)
                 zip_path = os.path.join(MODEL_FOLDER, zip_filename)
                 sign_model_dir(training_folder)
                 shutil.make_archive(base_name=zip_path.replace('.zip', ''), format='zip', root_dir=training_folder)

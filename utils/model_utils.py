@@ -145,7 +145,13 @@ except Exception as _e:
 # Train an AutoGluon model and return training results and plots
 def train_model(df, target_column, time_limit, save_path, stop_event=None, time_column=None,
                 prediction_length_percent=None, eval_metric=None, excluded_model_types=None,
-                num_bag_folds=None, val_size=None, progress=None, lang='en'):
+                num_bag_folds=None, val_size=None, progress=None, lang='en', val_df=None, test_df=None):
+    """Train with AutoGluon and evaluate on data the model did not see.
+
+    Evaluation data, in order of preference: the user's test set (`test_df`),
+    the user's validation set (`val_df`), a holdout split (`val_size`), or the
+    out-of-fold predictions of cross-validation (`num_bag_folds`).
+    """
     try:
         save_path = os.path.abspath(save_path)
 
@@ -168,7 +174,13 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
         # AutoGluon trains on df_train; metrics and plots come from df_val (unseen).
         df_val = None
         df_train = df  # keep reference to training data for feature importance
-        if not num_bag_folds and val_size:
+        if val_df is not None:
+            # The user's own validation set: AutoGluon uses it to tune and pick models
+            # (cross-validation would ignore it, so bagging is turned off)
+            df_val = val_df
+            num_bag_folds = 0
+            logging.info(f"User validation set: {len(df_train)} train / {len(df_val)} val")
+        elif not num_bag_folds and val_size:
             from sklearn.model_selection import train_test_split
             df_train, df_val = train_test_split(
                 df, test_size=val_size, random_state=42,
@@ -247,6 +259,8 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
 
         # predict_proba_oof → probability DataFrame → derive labels via argmax
         _proba_method = getattr(predictor, 'predict_proba_oof', None)
+        if test_df is not None:
+            _proba_method = None  # the test set replaces out-of-fold predictions
         if _proba_method is not None:
             for _mkw in [{}, {'silent': True}]:
                 try:
@@ -267,7 +281,7 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
                     logging.warning(f"predict_proba_oof({list(_mkw)}): {type(_e).__name__}: {_e}")
 
         # If proba failed, fall back to predict_oof which returns labels directly
-        if _oof_pred is None:
+        if _oof_pred is None and test_df is None:
             _pred_method = getattr(predictor, 'predict_oof', None)
             if _pred_method is not None:
                 for _mkw in [{}, {'silent': True}]:
@@ -281,8 +295,9 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
         # When bagging is disabled: use explicit val split (unseen) if available,
         # otherwise fall back to in-sample predictions.
         if _oof_pred is None:
-            eval_df = df_val if df_val is not None else df
-            source = "validation set" if df_val is not None else "in-sample (no val split provided)"
+            eval_df = test_df if test_df is not None else (df_val if df_val is not None else df)
+            source = ("test set" if test_df is not None else
+                      "validation set" if df_val is not None else "in-sample (no val split provided)")
             logging.info(f"OOF unavailable — generating predictions on {source}.")
             try:
                 X_plot = eval_df.drop(columns=[target_column])
@@ -311,7 +326,8 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
         if stop_event and stop_event.is_set():
             raise UserError("training_interrupted")
 
-        feature_importance_df = predictor.feature_importance(df_train)
+        # Importance on the test set when there is one (data the model never saw)
+        feature_importance_df = predictor.feature_importance(test_df if test_df is not None else df_train)
         feature_importance_plot = generate_feature_importance_plot(feature_importance_df, save_dir=plot_dir)
 
         leaderboard = predictor.leaderboard(silent=True)
@@ -340,7 +356,10 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
             # With bagging ON, score_val is already OOF-honest; passing training data to
             # extra_metrics would evaluate in-sample (inflated). Secondary metrics for
             # bagging mode are computed directly from _oof_pred further below instead.
-            if df_val is not None:
+            if test_df is not None:
+                _lb_extra = predictor.leaderboard(data=test_df, extra_metrics=_extra_metrics, silent=True)
+                leaderboard = _lb_extra  # adds score_test for every model
+            elif df_val is not None:
                 _lb_extra = predictor.leaderboard(data=df_val, extra_metrics=_extra_metrics, silent=True)
             else:
                 _lb_extra = leaderboard  # no extra columns — fall through to _col_val → None
@@ -365,7 +384,8 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
 
         # Fallback primary value from score_val with sign fix (used when extra_metrics
         # column is absent or NaN).
-        _best_score_raw = float(leaderboard[leaderboard['model'] == best_model]['score_val'].values[0])
+        _score_col = 'score_test' if (test_df is not None and 'score_test' in leaderboard.columns) else 'score_val'
+        _best_score_raw = float(leaderboard[leaderboard['model'] == best_model][_score_col].values[0])
         _em = predictor.eval_metric
         _gib = getattr(_em, 'greater_is_better', None)
         if _gib is None:
@@ -507,8 +527,19 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
             except Exception:
                 logging.exception("Could not build plot data")
 
+        if test_df is not None:
+            evaluation = {'kind': 'test', 'n': int(len(test_df))}
+        elif val_df is not None:
+            evaluation = {'kind': 'validation', 'n': int(len(val_df))}
+        elif df_val is not None:
+            evaluation = {'kind': 'holdout', 'n': int(len(df_val))}
+        else:
+            evaluation = {'kind': 'cv', 'n': int(len(df_train))}
+
+        lb_cols = [c for c in ('model', 'score_test', 'score_val', 'fit_time', 'pred_time_val') if c in leaderboard.columns]
         results = {
             'best_model': best_model,
+            'evaluation': evaluation,
             'plot_data': plot_data,
             'train_time': float(leaderboard['fit_time'].sum()),
             'task_type': task_type,
@@ -517,7 +548,7 @@ def train_model(df, target_column, time_limit, save_path, stop_event=None, time_
             'feature_importance': {str(k): float(v) for k, v in feature_importance_df['importance'].items() if np.isfinite(v)},
             'model_path': save_path,
             'used_gpu': used_gpu,
-            'leaderboard': leaderboard.to_dict(orient='records'),
+            'leaderboard': leaderboard[lb_cols].to_dict(orient='records'),
             'summary_LLM' : summary
         }
 

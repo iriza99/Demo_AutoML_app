@@ -157,6 +157,30 @@
             </div>
           </div>
 
+          <details class="card advanced" id="splits-section">
+            <summary>
+              <span data-i18n="splitsTitle">Own validation and test sets</span>
+              <span class="muted" data-i18n="splitsHint">optional · for users who already split their data</span>
+            </summary>
+            <div class="advanced-body">
+              <p class="muted" data-i18n="splitsIntro">The file above is used to train. Upload a test set to measure the model on data it never saw: the results will be those of the test set. The validation set is optional; without it, the model is validated on the training data (cross-validation).</p>
+              <div class="split-grid">
+                <div class="split-slot" id="split-val">
+                  <div class="split-head"><strong data-i18n="splitVal">Validation</strong> <span class="muted" data-i18n="optional">optional</span></div>
+                  <p class="muted small" data-i18n="splitValHint">Used to choose and tune the models.</p>
+                  <input type="file" id="split-val-input" accept=".csv,.xls,.xlsx,.xlsm,.arff" hidden onchange="loadSplitFile('val', this.files[0])">
+                  <div class="split-body"></div>
+                </div>
+                <div class="split-slot" id="split-test">
+                  <div class="split-head"><strong data-i18n="splitTest">Test</strong></div>
+                  <p class="muted small" data-i18n="splitTestHint">Only used at the end, for the metrics and plots of the results.</p>
+                  <input type="file" id="split-test-input" accept=".csv,.xls,.xlsx,.xlsm,.arff" hidden onchange="loadSplitFile('test', this.files[0])">
+                  <div class="split-body"></div>
+                </div>
+              </div>
+            </div>
+          </details>
+
           <div class="panel-actions">
             <button class="btn btn-primary btn-lg" type="button" onclick="setWizardStep(2)">
               <span data-i18n="continue">Continue</span>

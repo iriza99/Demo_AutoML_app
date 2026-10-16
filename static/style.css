@@ -850,3 +850,9 @@ select.is-empty { color: var(--text-muted); border-color: var(--primary); }
 .examples { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
 .examples .chip-btn strong { font-weight: 650; }
 .notice { margin: 0; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text-muted); font-size: .9rem; }
+.split-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 12px; }
+.split-slot { padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.split-slot p { margin: 2px 0 10px; }
+.split-status { margin: 8px 0 0 !important; font-size: .85rem; }
+.split-status.ok { color: var(--success); }
+.split-status.bad { color: var(--danger); }
